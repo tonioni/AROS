@@ -121,6 +121,11 @@ arosbootstrap_init:
 	 * This makes AROS m68k much more useful for low memory
 	 * systems when used as a KS ROM replacement.
 	 */
+	cmp.l #_rom_start,0xa80000
+	bcs.s 3f
+	cmp.l #_rom_start,0xb80000
+	bcs.s 1f
+3:
 	moveq #8,%d0
 	lea 0xbfee01,%a0
 	lea 0xafee01,%a1
