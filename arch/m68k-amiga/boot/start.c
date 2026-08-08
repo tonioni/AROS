@@ -349,7 +349,7 @@ static struct MemHeader *addmemoryregion(ULONG startaddr, ULONG size, struct Boo
         krnCreateMemHeader("magic fast memory", -8,
             (APTR)startaddr, size,
             MEMF_FAST | MEMF_PUBLIC | ((startaddr & 0xff000000) == 0 ? MEMF_24BITDMA : 0));
-    } else if (startaddr < 0x00c00000) {
+    } else if (startaddr < 0x00a00000) {
         krnCreateMemHeader("chip memory", -10,
             (APTR)startaddr, size,
             MEMF_CHIP | MEMF_KICK | MEMF_PUBLIC | MEMF_LOCAL | MEMF_24BITDMA);
@@ -819,20 +819,27 @@ void exec_boot(ULONG *membanks, ULONG *cpupcr)
          * and dominates boot time - skip it unless a ROM signature is found.
          */
         i = 0;
-        kickrom[i++] = (UWORD*)&_rom_start;
-        kickrom[i++] = (UWORD*)&_rom_end;
+        // Add full second 1M area if main ROM is located there
+        // This is UAE executable loaded 1M ROM region.
+        if ((UWORD*)&_rom_start >= (UWORD*)0xa80000 && (UWORD*)&_rom_start < (UWORD*)0xb80000) {
+            kickrom[i++] = (UWORD*)0x00a80000;
+            kickrom[i++] = (UWORD*)0x00b80000;
+        } else {
+            kickrom[i++] = (UWORD*)&_rom_start;
+            kickrom[i++] = (UWORD*)&_rom_end;
+            if (arosbootstrapmode) {
+                /* Scan only first rom image.
+                 * The rest is in BootStruct resident list
+                 */
+                resetKickMem (BootS);
+            } else {
+                kickrom[i++] = (UWORD*)&_ext_start;
+                kickrom[i++] = (UWORD*)&_ext_end;
+            }
+        }
         if (rom_present(0x00f00000)) {
             kickrom[i++] = (UWORD*)0x00f00000;
             kickrom[i++] = (UWORD*)0x00f80000;
-        }
-        if (arosbootstrapmode) {
-            /* Scan only first rom image.
-             * The rest is in BootStruct resident list
-             */
-            resetKickMem (BootS);
-        } else {
-            kickrom[i++] = (UWORD*)&_ext_start;
-            kickrom[i++] = (UWORD*)&_ext_end;
         }
         kickrom[i++] = (UWORD*)~0;
         kickrom[i++] = (UWORD*)~0;
