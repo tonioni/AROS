@@ -1443,11 +1443,22 @@ static void * init_Pool(struct MemHeaderExt *mhe, IPTR puddleSize, IPTR initialS
  */
 void krnCreateTLSFMemHeader(CONST_STRPTR name, BYTE pri, APTR start, IPTR size, ULONG flags)
 {
-    /* If the last available address is less than (1 << 31), MEMF_31BIT is implied */
+    /*
+     * If the last available address is less than (1 << 31), MEMF_31BIT is
+     * implied. On 64-bit systems an explicitly requested MEMF_31BIT is
+     * honoured as long as the region stays fully 32-bit addressable (see
+     * krnCreateMemHeader()); it is only stripped when the region extends
+     * beyond 4GB.
+     */
     if (((IPTR)start+size-1) < (1UL << 31))
         flags |= MEMF_31BIT;
+#if (__WORDSIZE > 32)
+    else if (((IPTR)start+size-1) > 0xFFFFFFFFUL)
+        flags &= ~MEMF_31BIT;
+#else
     else
         flags &= ~MEMF_31BIT;
+#endif
 
     flags |= MEMF_MANAGED;
 
