@@ -107,6 +107,35 @@ static void uaegfxhack(APTR uaeres, UBYTE *name)
    );
 }
 
+// Allocate UAE 0xa80000-0xb7ffff RAM completely and move it to lowest priority
+// after boot initializations have been done. 
+static void uaeramhack(void)
+{
+       struct MemHeader *mh;
+
+       Forbid();
+       mh = (struct MemHeader*)&SysBase->MemList.lh_Head;
+       while (mh->mh_Node.ln_Succ) {
+               if ((((ULONG)mh->mh_Lower) & 0xffff0000) == 0xa80000) {
+                       Remove(&mh->mh_Node);
+                       ULONG size = 65536;
+                       while (size) {
+                               for (;;) {
+                                       if (!Allocate(mh, size)) {
+                                               break;
+                                       }
+                               }
+                               size >>= 1;
+                       }
+                       mh->mh_Node.ln_Pri = -127;
+                       Enqueue(&SysBase->MemList.lh_Head, &mh->mh_Node);
+                       break;
+               }
+               mh = (struct MemHeader*)mh->mh_Node.ln_Succ;
+       }
+       Permit();
+}
+
 static AROS_UFH3 (APTR, Init,
                   AROS_UFHA(struct Library *, lh, D0),
                   AROS_UFHA(BPTR, segList, A0),
@@ -123,6 +152,8 @@ static AROS_UFH3 (APTR, Init,
         uaegfxhack(res, "uaelib_demux");
 
    romtaginit(eb);
+
+   uaeramhack();
 
    CloseLibrary((struct Library*)eb);
 

@@ -117,6 +117,39 @@ arosbootstrap_init:
 	 * up the system stack in A5.
 	 */
 
+	/* UAE "extra" RAM at 0xa80000 to 0xb7ffff.
+	 * This makes AROS m68k much more useful for low memory
+	 * systems when used as a KS ROM replacement.
+	 */
+	cmp.l #_rom_start,0xa80000
+	bcs.s 3f
+	cmp.l #_rom_start,0xb80000
+	bcs.s 1f
+3:
+	moveq #8,%d0
+	lea 0xbfee01,%a0
+	lea 0xafee01,%a1
+	clr.b %a1@
+	move.b %d0,%a0@
+	cmp.b %a1@,%d0
+	bne.s 2f
+	moveq #0,%d0
+	cmp.b %a1@,%d0
+	bne.s 1f
+2:
+	move.b %d0,%a0@
+	cmp.b %a1@,%d0
+	beq.s 1f
+	st.b %a1@+
+	clr.b %a1@
+	cmp.b #0xff,%a1@-
+	bne.s 1f
+	move.l #0x00a80000,%a0
+	move.l #0x00b80000,%a1
+	move.l #0x00100000,%d0
+	jsr     __MemoryTest
+1:
+
 	/* slow ram */
 	move.l	#0x00c00000,%a0
 	move.l	#0x00d80000,%a1
