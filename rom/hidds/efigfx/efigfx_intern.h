@@ -1,11 +1,10 @@
-#ifndef VCFBGFX_INTERN_H
-#define VCFBGFX_INTERN_H
+#ifndef EFIGFX_INTERN_H
+#define EFIGFX_INTERN_H
 
 /*
-    Copyright (C) 1995-2026, The AROS Development Team. All rights reserved.
+    Copyright (C) 2026, The AROS Development Team. All rights reserved.
 
-    Desc: VCFB Gfx private data.
-    Lang: English.
+    Desc: EFI framebuffer Gfx private data.
 */
 
 #ifndef EXEC_LIBRARIES_H
@@ -22,19 +21,19 @@
 
 #include <hidd/gfx.h>
 
-#include "vcgfx_support.h"
+#include "efigfx_support.h"
 
 #define ATTRBASES_NUM 8
 
-struct VCGfx_staticdata
+struct EFIGfx_staticdata
 {
     OOP_Class 	    	    *basebm;            /* baseclass for CreateObject */
-    
-    OOP_Class 	    	    *vcgfxclass;
+
+    OOP_Class 	    	    *efigfxclass;
     OOP_Class 	    	    *displayclass;
     OOP_Class 	    	    *bmclass;
-    OOP_Object      	    *vcgfxhidd;
-    OOP_Object      	    *vcfbdisplay;
+    OOP_Object      	    *efigfxhidd;
+    OOP_Object      	    *efidisplay;
     OOP_Object       	    *visible;		/* Currently visible bitmap */
     struct HWData   	    data;
     struct SignalSemaphore  framebufferlock;
@@ -43,16 +42,16 @@ struct VCGfx_staticdata
     OOP_AttrBase	    attrBases[ATTRBASES_NUM];
 };
 
-struct VCGfxBase
+struct EFIGfxBase
 {
     struct Library library;
-    struct VCGfx_staticdata vsd;
+    struct EFIGfx_staticdata vsd;
 };
 
 #define LOCK_FRAMEBUFFER(xsd)	ObtainSemaphore(&xsd->framebufferlock)
 #define UNLOCK_FRAMEBUFFER(xsd) ReleaseSemaphore(&xsd->framebufferlock)
 
-#define XSD(cl)	(&((struct VCGfxBase *)cl->UserData)->vsd)
+#define XSD(cl)	(&((struct EFIGfxBase *)cl->UserData)->vsd)
 
 #undef HiddChunkyBMAttrBase
 #undef HiddBitMapAttrBase
@@ -63,7 +62,7 @@ struct VCGfxBase
 #undef HiddDisplayAttrBase
 #undef HiddDMEnumAttrBase
 
-/* These must stay in the same order as interfaces[] array in vcgfx_init.c */
+/* These must stay in the same order as interfaces[] array in efigfx_init.c */
 #define HiddChunkyBMAttrBase	  XSD(cl)->attrBases[0]
 #define HiddBitMapAttrBase	  XSD(cl)->attrBases[1]
 #define HiddGfxAttrBase		  XSD(cl)->attrBases[2]
@@ -73,4 +72,4 @@ struct VCGfxBase
 #define HiddDisplayAttrBase	  XSD(cl)->attrBases[6]
 #define HiddDMEnumAttrBase	  XSD(cl)->attrBases[7]
 
-#endif /* VCFBGFX_INTERN_H */
+#endif /* EFIGFX_INTERN_H */
