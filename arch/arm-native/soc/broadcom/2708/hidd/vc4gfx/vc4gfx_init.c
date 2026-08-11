@@ -93,6 +93,19 @@ static int FNAME_SUPPORT(Init)(LIBBASETYPEPTR LIBBASE)
     KernelBase = OpenResource("kernel.resource");
     __arm_periiobase = KrnGetSystemAttr(KATTR_PeripheralBase);
 
+    /*
+     * This driver talks to the BCM283x VideoCore directly - HVS display
+     * lists, pixel valves, V3D. BCM2711 rearranges all of it, so leave that
+     * SoC to fbgfx, which only paints into the framebuffer the bootstrap
+     * already set up. Bowing out here, before the first register touch,
+     * keeps one kickstart usable on both boards.
+     */
+    if (__arm_periiobase == BCM2711_PERIIOBASE)
+    {
+        D(bug("[VideoCoreGfx] %s: BCM2711 - leaving the display to fbgfx\n", __PRETTY_FUNCTION__));
+        return FALSE;
+    }
+
     /* PV2 vsync IRQ handler; the source stays masked until the HVS
      * takeover arms it (vc4gfx_hvs.c). */
     vc4_hvs_init(xsd);
@@ -103,11 +116,12 @@ static int FNAME_SUPPORT(Init)(LIBBASETYPEPTR LIBBASE)
     if (!(MBoxBase = OpenResource("mbox.resource")))
         goto failure;
 
-    if (!(xsd->vcsd_MBoxBuff = (IPTR)AllocVec(16 + (sizeof(IPTR) * 2 * MAX_TAGS), MEMF_CLEAR)))
+    /* Own our cache lines; see <proto/mbox.h>. */
+    if (!(xsd->vcsd_MBoxBuff = (IPTR)AllocVec(MBOX_MSG_ALIGN + (sizeof(IPTR) * 2 * MAX_TAGS), MEMF_CLEAR)))
         goto failure;
 
     xsd->vcsd_MBoxMessage =
-        (unsigned int *)((xsd->vcsd_MBoxBuff + 0xF) & ~0x0000000F);
+        (unsigned int *)((xsd->vcsd_MBoxBuff + (MBOX_MSG_ALIGN - 1)) & ~(IPTR)(MBOX_MSG_ALIGN - 1));
 
     /* Init the mailbox lock before the first MBoxWrite/Read so every
      * transaction (even those before InitMem) can take it. */
