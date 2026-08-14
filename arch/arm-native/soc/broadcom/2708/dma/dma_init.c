@@ -29,6 +29,13 @@
 #define DMA_POOL_LITE   ((1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | \
                          (1 << 12))
 
+/*
+ * BCM2711 keeps more for itself: brcm,dma-channel-mask 0x7f5 against 0x7f35,
+ * so 11, 12 and the full engine 5 are the firmware's, not ours.
+ */
+#define DMA_POOL_FULL_BCM2711  ((1 << 2) | (1 << 4))
+#define DMA_POOL_LITE_BCM2711  ((1 << 8) | (1 << 9) | (1 << 10))
+
 APTR KernelBase __attribute__((used)) = NULL;
 
 static int dma_init(struct DMABase *DMABase)
@@ -75,6 +82,13 @@ static void dma_irq_handler(void *data1, void *data2)
     {
         struct Task *t;
 
+        /*
+         * Fine for DMAWaitChannel - its transfer is done by now - but this
+         * write also clears ACTIVE and the AXI priorities, which share the
+         * register. A caller chaining control blocks wants BCM2708_DMA_CS_ACK
+         * instead (see bcm2708_dma.h), which is why the AHI drivers run their
+         * own handlers.
+         */
         *cs = AROS_LONG2LE(DMA_CS_INT);
         t = DMABase->dma_Wait[channel].waiter;
         if (t)
@@ -114,15 +128,21 @@ AROS_LH1(int, DMAAllocChannel,
 
     ObtainSemaphore(&DMABase->dma_Sem);
 
-    /* Prefer lite channels so the scarce full engines stay available
-     * for users that need TDMODE. */
-    if (flags & DMACHF_TDMODE)
-        avail = DMA_POOL_FULL & ~DMABase->dma_InUse;
-    else
     {
-        avail = DMA_POOL_LITE & ~DMABase->dma_InUse;
-        if (avail == 0)
-            avail = DMA_POOL_FULL & ~DMABase->dma_InUse;
+        int is2711 = (DMABase->dma_periiobase == BCM2711_PERIIOBASE);
+        ULONG full = is2711 ? DMA_POOL_FULL_BCM2711 : DMA_POOL_FULL;
+        ULONG lite = is2711 ? DMA_POOL_LITE_BCM2711 : DMA_POOL_LITE;
+
+        /* Prefer lite channels so the scarce full engines stay available
+         * for users that need TDMODE. */
+        if (flags & DMACHF_TDMODE)
+            avail = full & ~DMABase->dma_InUse;
+        else
+        {
+            avail = lite & ~DMABase->dma_InUse;
+            if (avail == 0)
+                avail = full & ~DMABase->dma_InUse;
+        }
     }
 
     if (avail != 0)
@@ -147,7 +167,8 @@ AROS_LH1(int, DMAAllocChannel,
         DMABase->dma_Wait[channel].irq_handle = NULL;
         if (flags & DMACHF_IRQ)
             DMABase->dma_Wait[channel].irq_handle =
-                KrnAddIRQHandler(IRQ_DMA0 + channel, dma_irq_handler,
+                KrnAddIRQHandler(BCM2708_DMA_IRQ(DMABase->dma_periiobase, channel),
+                                 dma_irq_handler,
                                  DMABase, (void *)(IPTR)channel);
     }
 
@@ -221,6 +242,8 @@ AROS_LH2(int, DMAWaitChannel,
     BYTE dsig = -1;
     BYTE tsig = -1;
     int ret = -1;
+    BOOL do_reset = FALSE;
+    const char *reason = NULL;
 
     if ((channel < 0) || (channel > 14) ||
         !(DMABase->dma_InUse & (1 << channel)))
@@ -276,12 +299,14 @@ AROS_LH2(int, DMAWaitChannel,
         }
         if (!(v & DMA_CS_ACTIVE))
         {
-            *cs = AROS_LONG2LE(DMA_CS_RESET);
+            reason = "stopped";
+            do_reset = TRUE;
             break;
         }
         if ((dma_now_us(DMABase) - start) > timeout_us)
         {
-            *cs = AROS_LONG2LE(DMA_CS_RESET);
+            reason = "timeout";
+            do_reset = TRUE;
             break;
         }
 
@@ -314,6 +339,27 @@ AROS_LH2(int, DMAWaitChannel,
             WaitIO((struct IORequest *)&tr);
         }
         /* else: bounded poll until END/timeout */
+    }
+
+    /* Drain the reset: while RESET is asserted the channel ignores CONBLK_AD
+     * writes, so the next transfer would silently run the old control block. */
+    if (do_reset)
+    {
+        int try = 10000;
+
+        /* Before the reset wipes them. DEBUG bit 0 READ_LAST_NOT_SET, 1
+         * FIFO_ERROR, 2 READ_ERROR; CS bit 0 ACTIVE, 1 END, 8 ERROR. */
+        bug("[DMA] channel %d %s after %uus: cs=0x%08x debug=0x%08x\n",
+            channel, reason, timeout_us, AROS_LE2LONG(*cs),
+            AROS_LE2LONG(*(volatile ULONG *)DMA_DEBUG(channel)));
+
+        *cs = AROS_LONG2LE(DMA_CS_RESET);
+        while (try-- > 0)
+        {
+            if (!(AROS_LE2LONG(*cs) & DMA_CS_RESET))
+                break;
+        }
+        *cs = AROS_LONG2LE(DMA_CS_INT | DMA_CS_END);
     }
 
     if (dsig >= 0)
