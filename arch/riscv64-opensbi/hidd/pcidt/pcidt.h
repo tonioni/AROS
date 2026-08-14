@@ -63,6 +63,18 @@ struct pcidt_intmap
     ULONG   irq;        /* the source it comes out on           */
 };
 
+/* Where the message controller reports what has arrived, relative
+   to the DesignWare register block */
+#define DWC_MSI_INTR0_STATUS    0x830
+
+/* The controller has 32, which is also as many as DWC_MSI_INTR0_STATUS
+   can report in one word. The sources for them come out of a range
+   shared with every other bridge, so ask for the whole set and settle
+   for less when several are present - the request is halved until it
+   fits. With HW_IRQ_COUNT at 1024 there is now room for three bridges
+   to have all 32 rather than 8 apiece. */
+#define PCIDT_MSI_VECTORS   32
+
 struct pcidt_bridge
 {
     IPTR                cfgBase;        /* ECAM window, or DWC viewport */
@@ -116,7 +128,13 @@ struct pcidt_bridge
     IPTR                msiTarget;      /* address devices write to   */
     ULONG               msiUsed;        /* one bit per allocated vector */
     UBYTE               msiReady;
-    struct Interrupt    msiAck;
+    /*
+     * The sources the vectors were given, one after another from
+     * msiIrqBase. Whoever serves msiIrq fans out to them, so a driver
+     * hooking its own is entered only for its own device.
+     */
+    ULONG               msiIrqBase;
+    ULONG               msiVectors;
 };
 
 struct pcidt_staticdata
@@ -216,7 +234,9 @@ ULONG PCIDT_ReadConfig(struct pcidt_bridge *b, UBYTE bus, UBYTE dev,
 void  PCIDT_WriteConfig(struct pcidt_bridge *b, UBYTE bus, UBYTE dev,
                         UBYTE sub, UWORD reg, ULONG val);
 void  PCIDT_DropBootCfgWindows(struct pcidt_bridge *b);
+void  PCIDT_SetupOutboundWindows(struct pcidt_bridge *b);
 void  PCIDT_EnableDMA(struct pcidt_bridge *b, IPTR base, IPTR size);
+void  PCIDT_DumpLinkState(struct pcidt_bridge *b);
 void  PCIDT_DisableMSI(struct pcidt_bridge *b, UBYTE bus, UBYTE dev,
                        UBYTE sub);
 void  PCIDT_DumpIntStatus(struct pcidt_bridge *b, UBYTE bus, UBYTE dev,

@@ -66,8 +66,8 @@ ULONG METHOD(PCIMock, Hidd_PCIDriver, ReadConfigLong)
     {
         struct pHidd_PCIMockHardware_MemoryReadAtAddress mraa =
         {
-            .mID  = OOP_GetMethodID(IID_Hidd_PCIMockHardware, moHidd_PCIMockHardware_MemoryReadAtAddress),
-            .memoryaddress  = pciconfigspace + msg->reg
+            mID : OOP_GetMethodID(IID_Hidd_PCIMockHardware, moHidd_PCIMockHardware_MemoryReadAtAddress),
+            memoryaddress : pciconfigspace + msg->reg
         };
         
         OOP_DoMethod(mockHardware, (OOP_Msg)&mraa);
@@ -95,8 +95,8 @@ VOID METHOD(PCIMock, Hidd_PCIDriver, WriteConfigLong)
     {
         struct pHidd_PCIMockHardware_MemoryChangedAtAddress mcaa =
         {
-            .mID  = OOP_GetMethodID(IID_Hidd_PCIMockHardware, moHidd_PCIMockHardware_MemoryChangedAtAddress),
-            .memoryaddress  = pciconfigspace + msg->reg
+            mID : OOP_GetMethodID(IID_Hidd_PCIMockHardware, moHidd_PCIMockHardware_MemoryChangedAtAddress),
+            memoryaddress : pciconfigspace + msg->reg
         };
         
         OOP_DoMethod(mockHardware, (OOP_Msg)&mcaa);
@@ -139,8 +139,8 @@ static int PCIMock_InitClass(LIBBASETYPEPTR LIBBASE)
         LIBBASE->sd.mockHardwareBus0[i] = NULL;
 
     ADD_DEVICE((&LIBBASE->sd), 0, CLID_Hidd_PCIMockHardware_SIS661FX);
-    ADD_DEVICE((&LIBBASE->sd), 2, CLID_Hidd_PCIMockHardware_NV44A);
-//    ADD_DEVICE((&LIBBASE->sd), 3, CLID_Hidd_PCIMockHardware_NVG86);
+    // ADD_DEVICE((&LIBBASE->sd), 2, CLID_Hidd_PCIMockHardware_NV44A);
+   ADD_DEVICE((&LIBBASE->sd), 3, CLID_Hidd_PCIMockHardware_NVG86);
 //    ADD_DEVICE((&LIBBASE->sd), 4, CLID_Hidd_PCIMockHardware_NVGTS250);
 //    ADD_DEVICE((&LIBBASE->sd), 5, CLID_Hidd_PCIMockHardware_NVGF100);
 

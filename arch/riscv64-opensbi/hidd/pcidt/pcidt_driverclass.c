@@ -14,6 +14,8 @@
 
 #include <aros/symbolsets.h>
 #include <aros/kernel.h>
+#include <aros/irqtypes.h>
+#include <resources/kernel.h>
 
 #include <exec/types.h>
 #include <exec/memory.h>
@@ -242,6 +244,38 @@ static void pcidt_assignbars(struct pcidt_staticdata *psd,
                 hdr = (PCIDT_ReadConfig(b, bus, dev, sub, 0x0c) >> 16) & 0xff;
                 if (sub == 0 && (hdr & 0x80))
                     nfunc = 8;
+                if ((hdr & 0x7f) == 1)
+                {
+                    /*
+                     * A bridge only forwards upstream memory requests
+                     * with bus mastering enabled on it; firmware does
+                     * not necessarily leave it set. Devices behind it
+                     * enable their own mastering, but without this bit
+                     * their transactions die at the bridge.
+                     */
+                    ULONG cmd = PCIDT_ReadConfig(b, bus, dev, sub, 0x04);
+                    PCIDT_WriteConfig(b, bus, dev, sub, 0x04, cmd | 0x0007);
+                    D(bug("[PCIDT:Driver] %02x:%02x.%x bridge command %04x -> %04x\n",
+                        bus, dev, sub, cmd & 0xffff,
+                        PCIDT_ReadConfig(b, bus, dev, sub, 0x04) & 0xffff);)
+                    if (bus == b->busStart)
+                    {
+                        /*
+                         * The root port's own base registers claim
+                         * upstream traffic into the bridge; whatever
+                         * range firmware left in them is a hole no
+                         * device can master through. Linux clears them
+                         * unconditionally (dw_pcie_setup_rc) - do the
+                         * same.
+                         */
+                        D(bug("[PCIDT:Driver] %02x:%02x.%x root bars %08x %08x -> cleared\n",
+                            bus, dev, sub,
+                            PCIDT_ReadConfig(b, bus, dev, sub, 0x10),
+                            PCIDT_ReadConfig(b, bus, dev, sub, 0x14));)
+                        PCIDT_WriteConfig(b, bus, dev, sub, 0x10, 0x00000004);
+                        PCIDT_WriteConfig(b, bus, dev, sub, 0x14, 0x00000000);
+                    }
+                }
                 if ((hdr & 0x7f) != 0)
                     continue;
                 lastreg = 0x24;
@@ -343,6 +377,7 @@ static void pcidt_assignbars(struct pcidt_staticdata *psd,
                     PCIDT_WriteConfig(b, bus, dev, sub, 0x04,
                                       (cmd & 0xffff0000) | ((cmd & 0xffff) | 0x0003));
                 }
+
             }
         }
 
@@ -523,26 +558,6 @@ ULONG PCIDT_MapInterrupt(struct pcidt_bridge *b, UBYTE bus, UBYTE dev,
 }
 
 /*
- * Acknowledge the controller's message interrupts.
- *
- * Runs ahead of the drivers on the same source, at a higher priority,
- * because the status register has to be cleared for the line to drop -
- * a driver that does not know about the controller cannot do it, and
- * the source would never go quiet.
- */
-static AROS_INTH1(pcidt_msiack, struct pcidt_bridge *, b)
-{
-    AROS_INTFUNC_INIT
-
-    PCIDT_MSIAck(b);
-
-    /* Let the drivers sharing this source look at their hardware */
-    return FALSE;
-
-    AROS_INTFUNC_EXIT
-}
-
-/*
  * Which source the controller raises for message interrupts.
  *
  * The names run alongside the interrupts, so the position of "msi" in
@@ -689,6 +704,7 @@ static ULONG pcidt_discover(struct pcidt_staticdata *psd)
             /* The windows devices behind this bridge will answer in */
             pcidt_mapranges(psd, node, b);
             PCIDT_DropBootCfgWindows(b);
+            PCIDT_SetupOutboundWindows(b);
             pcidt_assignbars(psd, b);
             pcidt_map64bars(psd, b);
 
@@ -715,12 +731,42 @@ static ULONG pcidt_discover(struct pcidt_staticdata *psd)
 
                 if (page && PCIDT_MSIInit(b, (IPTR)page))
                 {
-                    b->msiAck.is_Node.ln_Name = (STRPTR)"pcidt message interrupts";
-                    b->msiAck.is_Node.ln_Pri = 100;
-                    b->msiAck.is_Node.ln_Type = NT_INTERRUPT;
-                    b->msiAck.is_Code = (VOID_FUNC)pcidt_msiack;
-                    b->msiAck.is_Data = b;
-                    AddIntServer(INTB_KERNEL + b->msiIrq, &b->msiAck);
+                    APTR KernelBase = psd->kernelBase;
+                    ULONG vectors = PCIDT_MSI_VECTORS;
+                    ULONG base = (ULONG)-1;
+
+                    /*
+                     * Sources for the vectors, and the controller
+                     * named to whoever serves its line: everything it
+                     * receives arrives there, and only its pending
+                     * register says which device signalled.
+                     */
+                    while (vectors && base == (ULONG)-1)
+                    {
+                        base = KrnAllocIRQ(IRQTYPE_MSI, vectors);
+                        if (base == (ULONG)-1)
+                            vectors >>= 1;
+                    }
+
+                    if (base != (ULONG)-1)
+                    {
+                        struct TagItem irqattrs[] =
+                        {
+                            { KERNELTAG_IRQ_MSISTATUS, b->dbiBase + DWC_MSI_INTR0_STATUS },
+                            { KERNELTAG_IRQ_MSIBASE,   base                              },
+                            { KERNELTAG_IRQ_MSICOUNT,  vectors                           },
+                            { TAG_DONE,          0                                 }
+                        };
+
+                        b->msiIrqBase = base;
+                        b->msiVectors = vectors;
+                        KrnModifyIRQA(b->msiIrq, irqattrs);
+
+                        D(bug("[PCIDT:Driver] %u message vector(s) on source %u, from %u\n",
+                              vectors, b->msiIrq, base);)
+                    }
+                    else
+                        b->msiReady = 0;
                 }
                 else if (page)
                     FreeMem(page, 4096);
