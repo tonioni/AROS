@@ -19,6 +19,7 @@
 #include <exec/execbase.h>
 #include <exec/interrupts.h>
 #include <hardware/intbits.h>
+#include <hardware/bcm2708.h>
 #include <proto/arossupport.h>
 #include <proto/bootloader.h>
 #include <proto/exec.h>
@@ -39,28 +40,9 @@
  */
 static void timer_ProcessTick(struct TimerBase *TimerBase, struct ExecBase *SysBase)
 {
-    unsigned int last_CLO;
-    D(unsigned int last_CHI);
+    /* EClockUpdate() (ticks.c) owns the counter arithmetic. */
+    EClockUpdate(TimerBase);
 
-    D(last_CHI = TimerBase->tb_Platform.tbp_CHI);
-    last_CLO = TimerBase->tb_Platform.tbp_CLO;
-
-    TimerBase->tb_Platform.tbp_CHI = *((volatile unsigned int *)(SYSTIMER_CHI));
-    TimerBase->tb_Platform.tbp_CLO = *((volatile unsigned int *)(SYSTIMER_CLO));
-
-    D(bug("[Timer] %s: Updating EClock..\n", __func__));
-    D(bug("[Timer] %s:   diff_CHI = %d\n", __func__, (TimerBase->tb_Platform.tbp_CHI - last_CHI)));
-    D(bug("[Timer] %s:   diff_CLO = %d\n", __func__, (TimerBase->tb_Platform.tbp_CLO - last_CLO)));
-
-    TimerBase->tb_Platform.tbp_TickRate.tv_secs  = 0;
-    if ((TimerBase->tb_Platform.tbp_CLO - last_CLO) > 0)
-        TimerBase->tb_Platform.tbp_TickRate.tv_micro = TimerBase->tb_Platform.tbp_CLO - last_CLO;
-    else
-        TimerBase->tb_Platform.tbp_TickRate.tv_micro = ((1000000 - last_CLO) + TimerBase->tb_Platform.tbp_CLO);
-
-    /* Increment EClock value and process microhz requests */
-    ADDTIME(&TimerBase->tb_CurrentTime, &TimerBase->tb_Platform.tbp_TickRate);
-    ADDTIME(&TimerBase->tb_Elapsed, &TimerBase->tb_Platform.tbp_TickRate);
     TimerBase->tb_ticks_total++;
 
     D(bug("[Timer] %s: Processing events.. \n", __func__));
@@ -124,10 +106,16 @@ static int Timer_Init(struct TimerBase *TimerBase)
 
     TimerBase->tb_Platform.tbp_periiobase = KrnGetSystemAttr(KATTR_PeripheralBase);
 
+    /* BCM2711 and BCM2712 both present the legacy GPU interrupts through
+     * the GIC at +96, and both want the VBlank-driven MicroHZ fallback:
+     * the systimer compare SPI is not guaranteed to be delivered. */
+    int isGIC = (TimerBase->tb_Platform.tbp_periiobase == BCM2711_PERIIOBASE ||
+                 TimerBase->tb_Platform.tbp_periiobase == BCM2712_PERIIOBASE);
+
     /* Install timer IRQ handler */
     timerIRQ = IRQ_TIMER0 + TICK_TIMER;
-    if (TimerBase->tb_Platform.tbp_periiobase == BCM2711_PERIIOBASE)
-        timerIRQ += BCM2711_GPUIRQ_OFFSET;
+    if (isGIC)
+        timerIRQ += BCM271X_GPUIRQ_OFFSET;
 
     TimerBase->tb_TimerIRQHandle = KrnAddIRQHandler(timerIRQ, Timer1Tick, TimerBase, SysBase);
     if (!TimerBase->tb_TimerIRQHandle)
@@ -174,12 +162,15 @@ static int Timer_Init(struct TimerBase *TimerBase)
     Forbid();
     TimerBase->tb_Platform.tbp_CHI = *((volatile unsigned int *)(SYSTIMER_CHI));
     TimerBase->tb_Platform.tbp_CLO = *((volatile unsigned int *)(SYSTIMER_CLO));
+    /* At 0 the first EClockUpdate would book the whole uptime. */
+    TimerBase->tb_Platform.tbp_EClockLast =
+        ((UQUAD)TimerBase->tb_Platform.tbp_CHI << 32) | TimerBase->tb_Platform.tbp_CLO;
     *((volatile unsigned int *)(SYSTIMER_C0 + (TICK_TIMER * 4))) = (TimerBase->tb_Platform.tbp_CLO + TimerBase->tb_Platform.tbp_TickRate.tv_micro);
     Permit();
 
     vblank_Init(TimerBase);
 
-    if (TimerBase->tb_Platform.tbp_periiobase == BCM2711_PERIIOBASE)
+    if (isGIC)
     {
         TimerBase->tb_Platform.tbp_MicroHZInt.is_Node.ln_Pri  = 0;
         TimerBase->tb_Platform.tbp_MicroHZInt.is_Node.ln_Type = NT_INTERRUPT;
@@ -189,7 +180,7 @@ static int Timer_Init(struct TimerBase *TimerBase)
 
         AddIntServer(INTB_VERTB, &TimerBase->tb_Platform.tbp_MicroHZInt);
 
-        D(bug("[Timer] Timer_Init: microhz driven from VBlank (BCM2711)\n"));
+        D(bug("[Timer] Timer_Init: microhz driven from VBlank (BCM2711/BCM2712)\n"));
     }
 
     D(bug("[Timer] Timer_Init: configured GPU timer %d\n", TICK_TIMER));

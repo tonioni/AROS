@@ -19,11 +19,23 @@
 #include <proto/utility.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
+#define __M68KEMU_NOLIBBASE__
+#include <proto/m68kemu.h>
+
 #include "dos_intern.h"
+#include <dos_platform.h>
 #include LC_LIBDEFS_FILE
 #include <string.h>
 
 #define SEGARRAY_LENGTH 6       /* Minimum needed for HUNK overlays */
+
+#ifndef PROC_STACKSIZE
+#define PROC_STACKSIZE AROS_STACKSIZE
+#endif
+
+#ifndef PROC_MINSTACKSIZE
+#define PROC_MINSTACKSIZE PROC_STACKSIZE
+#endif
 
 static void DosEntry(void);
 static void freeLocalVars(struct Process *process, struct DosLibrary *DOSBase);
@@ -57,6 +69,12 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
         Pointer to the new process or NULL on error.
 
     NOTES
+        NP_Affinity places the process on a set of CPUs. It only does
+        anything on an SMP build; elsewhere it is accepted and ignored.
+        Without it the process inherits the CPU it was created on. The
+        mask comes from KrnAllocCPUMask() and becomes the system's to
+        free, as for TASKTAG_AFFINITY.
+
         It is possible to supply NP_Input, NP_Output and NP_Error tags
         with BNULL values. This is equal to NIL: handle, however if NP_Input
         is set to BNULL, NP_Arguments tag will not work. Arguments are
@@ -85,6 +103,15 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
     struct Process              *me = (struct Process *)FindTask(NULL);
     ULONG                        old_sig = 0;
     APTR                         entry;
+    BOOL                         added;
+#if defined(__AROSEXEC_SMP__)
+    IPTR                         affinity;
+    struct TagItem               addTaskTags[] =
+    {
+        { TASKTAG_AFFINITY, (IPTR)NULL },
+        { TAG_DONE        , 0          }
+    };
+#endif
 
     /* TODO: NP_CommandName */
 
@@ -101,7 +128,7 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
     /* 6 */    { NP_Error         , TAGDATA_NOT_SPECIFIED       },
     /* 7 */    { NP_CloseError    , 1                           },
     /* 8 */    { NP_CurrentDir    , TAGDATA_NOT_SPECIFIED       },
-    /* 9 */    { NP_StackSize     , AROS_STACKSIZE              },
+    /* 9 */    { NP_StackSize     , PROC_STACKSIZE              },
     /*10 */    { NP_Name          , (IPTR)"New Process"         },
     /*11 */    { NP_Priority      , me->pr_Task.tc_Node.ln_Pri  },
     /*12 */    { NP_Arguments     , TAGDATA_NOT_SPECIFIED       },
@@ -117,6 +144,9 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
     /*22 */    { NP_Path          , TAGDATA_NOT_SPECIFIED       }, /* Default: copy path from parent */
     /*23 */    { NP_NotifyOnDeath , (IPTR)FALSE                 },
     /*24 */    { NP_ConsoleTask   , TAGDATA_NOT_SPECIFIED       },
+#if defined(__AROSEXEC_SMP__)
+    /*25 */    { NP_Affinity      , (IPTR)NULL                  },
+#endif
                { TAG_END          , 0                           }
     };
 
@@ -136,7 +166,7 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
             LONG parentstack = cli->cli_DefaultStack * CLI_DEFAULTSTACK_UNIT;
 
             D(bug("[createnewproc] Parent stack: %u (0x%08X)\n", parentstack, parentstack));
-            if (parentstack > AROS_STACKSIZE)
+            if (parentstack > PROC_STACKSIZE)
             {
                 defaults[9].ti_Data = parentstack;
             }
@@ -147,6 +177,11 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
     }
 
     ApplyTagChanges(defaults, (struct TagItem *)tags);
+
+#if defined(__AROSEXEC_SMP__)
+    affinity = defaults[25].ti_Data;
+    addTaskTags[0].ti_Data = affinity;
+#endif
 
     D({
         int i;
@@ -217,10 +252,10 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
      * Yes, 64-bit systems appear to be strictly typed in such places.
      */
     process->pr_StackSize = defaults[9].ti_Data;
-    /* We need a minimum stack to handle interrupt contexts */
-    if (process->pr_StackSize < AROS_STACKSIZE)
+    /* Enforce the platform's minimum process stack. */
+    if (process->pr_StackSize < PROC_MINSTACKSIZE)
     {
-        process->pr_StackSize = AROS_STACKSIZE;
+        process->pr_StackSize = PROC_MINSTACKSIZE;
     }
 
     stack = AllocMem(process->pr_StackSize, MEMF_PUBLIC);
@@ -495,9 +530,29 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
     /* Use AddTask() instead of NewAddTask().
      * Blizzard SCSI Kit boot ROM plays SetFunction() tricks with
      * AddTask() and assumes it is called by a process early enough!
+     *
+     * On an SMP build NP_Affinity is the exception: it must reach
+     * PrepareContext(), which only sees a tag list, before the task is
+     * queued. Only a caller that asked for a placement takes that path.
      */
-    if (AddTask(&process->pr_Task, DosEntry, NULL))
+    /*
+     * Multi-user: the owner of a setuid executable must be applied before
+     * the new process gets to run, so hold Forbid() across AddTask().
+     */
+    Forbid();
+#if defined(__AROSEXEC_SMP__)
+    if (affinity)
+        added = (NewAddTask(&process->pr_Task, DosEntry, NULL, addTaskTags) != NULL);
+    else
+        added = (AddTask(&process->pr_Task, DosEntry, NULL) != NULL);
+#else
+    added = (AddTask(&process->pr_Task, DosEntry, NULL) != NULL);
+#endif
+    if (added)
     {
+        if (SECURITY_ACTIVE && segList)
+            secSetTaskOwnerFromSegment(&process->pr_Task, segList);
+        Permit();
         /* Use defaults[19].ti_Data instead of testing against
          * (process->pr_Flags & PRF_SYNCHRONOUS).
          *
@@ -532,6 +587,7 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
 
         goto end;
     }
+    Permit();
 
     /* Fall through */
 enomem:
@@ -776,8 +832,43 @@ static void DosEntry(void)
 
     D(bug("[DosEntry %p] entry=%p, CIS=%p, COS=%p, argsize=%d, arguments=\"%s\"\n", me, initialPC, BADDR(me->pr_CIS), BADDR(me->pr_COS), argSize, me->pr_Arguments));
 
+    /* Get our own private DOSBase. We'll need it for our
+     * cleanup routines.
+     *
+     * We don't want to use the parent's DOSBase, since they
+     * may have closed their handle long ago.
+     *
+     * With the current DOSBase implementation, this isn't a
+     * big deal, but if DOSBase moved to a per-opener library
+     * in the future, this would be a very subtle issue, so
+     * we're going to plan ahead and do it right.
+     */
+    DOSBase = TaggedOpenLibrary(TAGGEDOPEN_DOS);
+    if (DOSBase == NULL) {
+        D(bug("[DosEntry %p] Can't open DOS library\n", me));
+        Alert(AT_DeadEnd | AG_OpenLib | AO_DOSLib);
+    }
+
+#if !defined(__mc68000__)
+    /* Check if this is an m68k hunk binary and route through emulator */
+    {
+        IPTR hunkinfo = 0;
+        struct TagItem htags[] = { { GSLI_68KHUNK, (IPTR)&hunkinfo }, { TAG_DONE, 0 } };
+        if (segArray[3] && GetSegListInfo(segArray[3], htags) && hunkinfo)
+        {
+            struct Library *M68KEmuBase = OpenLibrary("m68kemu.library", 0);
+            if (M68KEmuBase) {
+                result = RunHunk(segArray[3], me->pr_StackSize, me->pr_Arguments, argSize);
+                CloseLibrary(M68KEmuBase);
+                goto skip_native_entry;
+            }
+        }
+    }
+#endif
+
     /* Call entry point of our process, remembering stack in its pr_ReturnAddr */
     result = CallEntry(me->pr_Arguments, argSize, initialPC, me);
+skip_native_entry:
 
     /* Call user defined exit function before shutting down. */
     if (me->pr_ExitCode != NULL)
@@ -810,23 +901,6 @@ static void DosEntry(void)
          void (*doExitCode)(IPTR, IPTR) = (void (*)(IPTR, IPTR))me->pr_ExitCode;
         doExitCode(result, me->pr_ExitData);
 #endif
-    }
-
-    /* Get our own private DOSBase. We'll need it for our
-     * cleanup routines.
-     *
-     * We don't want to use the parent's DOSBase, since they
-     * may have closed their handle long ago.
-     *
-     * With the current DOSBase implementation, this isn't a
-     * big deal, but if DOSBase moved to a per-opener library
-     * in the future, this would be a very subtle issue, so
-     * we're going to plan ahead and do it right.
-     */
-    DOSBase = TaggedOpenLibrary(TAGGEDOPEN_DOS);
-    if (DOSBase == NULL) {
-        D(bug("[DosEntry %p] Can't open DOS library\n", me));
-        Alert(AT_DeadEnd | AG_OpenLib | AO_DOSLib);
     }
 
     D(bug("Deleting local variables\n"));

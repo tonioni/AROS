@@ -463,10 +463,15 @@ BOOL HIDDNouveauNV04FillSolidRect(struct CardData * carddata,
     struct HIDDNouveauBitMapData * bmdata, LONG minX, LONG minY, LONG maxX,
     LONG maxY, ULONG drawmode, ULONG color)
 {
+    if (!carddata->channel)
+        return FALSE;
+
     if (NV04EXAPrepareSolid(bmdata, drawmode, ~0, color))
     {
         NV04EXASolid(bmdata, minX, minY, maxX + 1, maxY + 1, color);
         NV04EXADoneSolid(bmdata);
+        bmdata->gpu_dirty = TRUE;
+		HIDDNouveauFlushDisplayable(carddata, bmdata);
         return TRUE;
     }
 
@@ -480,10 +485,21 @@ BOOL HIDDNouveauNV04CopySameFormat(struct CardData * carddata,
     LONG srcX, LONG srcY, LONG destX, LONG destY, LONG width, LONG height,
     ULONG drawmode)
 {
+	/* acceleration setup can fail and leave the channel torn down;
+	 * report the blit as not accelerated rather than dereference it */
+	if (!carddata->pushbuf)
+		return FALSE;
+
+    if (!carddata->channel)
+        return FALSE;
+
     if (NV04EXAPrepareCopy(srcdata, destdata, 0, 0, drawmode, ~0))
     {
         NV04EXACopy(destdata, srcX, srcY, destX, destY, width, height);
         NV04EXADoneCopy(destdata);
+        srcdata->gpu_dirty = TRUE;
+        destdata->gpu_dirty = TRUE;
+		HIDDNouveauFlushDisplayable(carddata, destdata);
         return TRUE;
     }
 

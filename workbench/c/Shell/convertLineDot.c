@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 1995-2021, The AROS Development Team. All rights reserved.
+    Copyright (C) 1995-2026, The AROS Development Team. All rights reserved.
  */
 
 #include <exec/memory.h>
@@ -15,11 +15,14 @@ static LONG getArgumentIdx(ShellState *ss, STRPTR name, LONG len)
     struct SArg *a;
     LONG i;
 
+    if (len > MAXARGLEN)
+        return -1;
+
     for (i = 0; i < ss->argcount; ++i)
     {
         a = ss->args + i;
 
-        if (strncmp(a->name, name, len) == 0)
+        if (a->namelen == len && strncmp(a->name, name, len) == 0)
             return i;
     }
 
@@ -46,7 +49,12 @@ static LONG dotDef(ShellState *ss, STRPTR szz, Buffer *in, LONG len)
 
     if ((result = bufferReadItem(buf, sizeof(buf), in, ss)) == ITEM_UNQUOTED)
     {
+        STRPTR def;
+
         len = in->cur - i;
+
+        if (len > MAXARGLEN)
+            return ERROR_LINE_TOO_LONG;
 
         i = getArgumentIdx(ss, buf, len);
         if (i < 0)
@@ -66,12 +74,17 @@ static LONG dotDef(ShellState *ss, STRPTR szz, Buffer *in, LONG len)
 
         len = in->cur - i;
 
+        def = AllocMem(len + 1, MEMF_LOCAL);
+        if (!def)
+            return ERROR_NO_FREE_STORE;
+
+        CopyMem(buf, def, len);
+        def[len] = '\0';
+
         if (a->def)
             FreeMem((APTR) a->def, a->deflen + 1);
 
-        a->def = (IPTR) AllocMem(len + 1, MEMF_LOCAL);
-        CopyMem(buf, (APTR) a->def, len);
-        ((STRPTR) a->def)[len] = '\0';
+        a->def = (IPTR) def;
         a->deflen = len;
         return 0;
     }
@@ -116,7 +129,13 @@ static LONG dotKey(ShellState *ss, STRPTR s, Buffer *in)
         for (len = 0; *s != '/' && *s != ',' && *s != '\n' && *s != '\0'; ++s)
             ++len;
 
+        if (len > MAXARGLEN)
+            return ERROR_LINE_TOO_LONG;
+
         j = getArgumentIdx(ss, s - len, len);
+        if (j < 0)
+            return ERROR_TOO_MANY_ARGS;
+
         arg = (STRPTR) ss->arg[j];
         a = ss->args + j;
 
@@ -210,7 +229,11 @@ LONG convertLineDot(ShellState *ss, Buffer *in)
     }
     else if (strncasecmp(s, "pushis", 6) == 0)
     {
-        pushInterpreterState(ss);
+        LONG error = pushInterpreterState(ss);
+
+        if (error)
+            return error;
+
         res = s;
     }
 #else /* this ugly version is 424 bytes smaller on x64 */
@@ -274,16 +297,27 @@ LONG convertLineDot(ShellState *ss, Buffer *in)
                     res = &ss->dot;
         }
     }
-    else if (*s == 'p')
+    else if (*s == 'p' || *s == 'P')
     {
-        if (*++s == 'o' && s[1] == 'p') /* .popis */
+        if ((*++s == 'o' || *s == 'O') &&
+            (s[1] == 'p' || s[1] == 'P') &&
+            (s[2] == 'i' || s[2] == 'I') &&
+            (s[3] == 's' || s[3] == 'S')) /* .popis */
         {
             popInterpreterState(ss);
             res = s;
         }
-        else if (*s == 'u' && s[1] == 's' && s[2] == 'h') /* .pushis */
+        else if ((*s == 'u' || *s == 'U') &&
+                 (s[1] == 's' || s[1] == 'S') &&
+                 (s[2] == 'h' || s[2] == 'H') &&
+                 (s[3] == 'i' || s[3] == 'I') &&
+                 (s[4] == 's' || s[4] == 'S')) /* .pushis */
         {
-            pushInterpreterState(ss);
+            LONG error = pushInterpreterState(ss);
+
+            if (error)
+                return error;
+
             res = s;
         }
     }

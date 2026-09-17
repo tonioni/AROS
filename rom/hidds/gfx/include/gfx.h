@@ -2,7 +2,7 @@
 #define HIDD_GRAPHICS_H
 
 /*
-    Copyright � 1995-2019, The AROS Development Team. All rights reserved.
+    Copyright (C) 1995-2026, The AROS Development Team. All rights reserved.
     $Id$
 
     Desc: Definitions for the Gfx Hidd system.
@@ -127,7 +127,11 @@ struct HIDD_ViewPortData
     OOP_Object               *Bitmap;   /* The bitmap object itself             */
     struct ViewPortExtra     *vpe;      /* Associated ViewPortExtra             */
     APTR                      UserData; /* The driver can keep own stuff here   */
+    OOP_Object               *PreviousBitmap; /* Kept alive until display swap    */
+    ULONG                     Flags;
 };
+
+#define HIDD_VPDF_PREVIOUS_BITMAP_OWNED (1UL << 0)
 
 #define vHidd_ModeID_Invalid ((HIDDT_ModeID)-1)
 
@@ -580,6 +584,19 @@ enum
 #define CLID_Hidd_DMEnum IID_Hidd_DMEnum
 
 /************* Display class *****************************/
+
+/* Connector types (aHidd_Display_ConnectorType) */
+#define vHidd_ConnectorType_Unknown     0
+#define vHidd_ConnectorType_VGA         1
+#define vHidd_ConnectorType_DVI         2
+#define vHidd_ConnectorType_HDMI        3
+#define vHidd_ConnectorType_DisplayPort 4
+#define vHidd_ConnectorType_eDP         5
+#define vHidd_ConnectorType_LVDS        6
+#define vHidd_ConnectorType_TV          7
+#define vHidd_ConnectorType_DSI         8
+#define vHidd_ConnectorType_Virtual     9
+#define vHidd_ConnectorType_USBC        10
 
 #include <interface/Hidd_Display.h>
 

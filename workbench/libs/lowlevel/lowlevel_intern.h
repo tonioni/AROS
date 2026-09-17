@@ -61,12 +61,25 @@ struct LowLevelBase
     struct MsgPort          	*ll_TimerMP;
     struct IOStdReq         	*ll_TimerIO;
 
+    /* System requester gate (private LVOs -120/-126, see
+     * systemrequesters.c). ll_SysReqNest is -1 when requesters are
+     * allowed; each DisableSystemRequesters() raises it. */
+    struct Library              *ll_IntuitionBase;
+    APTR                        ll_EasyRequestOrig;
+    LONG                        ll_SysReqNest;
+
+    struct Task                 *ll_InputOwner;
+    BYTE                        ll_InputNest;
+
     struct llArchData           ll_Arch;
 };
+
+/* systemrequesters.c: restore the EasyRequestArgs() vector and close
+ * intuition on expunge. */
+VOID llSysReq_Cleanup(struct LowLevelBase *LowLevelBase);
 
 /*
  * Defintion of internal structures.
  */
 
 #endif /* __LOWLEVEL_INTERN_H__  */
-

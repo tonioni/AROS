@@ -23,7 +23,7 @@ struct DMAChWait {
 struct DMABase {
     struct Node                 dma_Node;
     struct SignalSemaphore      dma_Sem;
-    unsigned int                dma_periiobase;
+    IPTR                        dma_periiobase;
     unsigned int                dma_InUse;      /* Bitmask of allocated channels */
 
     struct DMAChWait            dma_Wait[15];
@@ -36,6 +36,8 @@ struct DMABase {
 };
 
 #define ARM_PERIIOBASE DMABase->dma_periiobase
+#define DMA0_BASE      BCM2708_DMA_BASE(DMABase->dma_periiobase)
+#include <hardware/bcm2708_dma.h>
 #include <hardware/bcm2708.h>
 
 #endif /* DMA_PRIVATE_H_ */

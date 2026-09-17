@@ -30,8 +30,15 @@
 #   include <devices/timer.h>
 #endif
 
-/* Size of the input device's stack */
+/* Size of the input device's stack. Input handlers run on it, so it
+ * keeps generous headroom over the measured peak (under 1 KB on m68k);
+ * Kickstart gives its input.device task 4 KB and handlers are expected
+ * to be frugal, so use the same size after measuring a peak below 1 KB. */
+#ifdef __mc68000
+#define IDTASK_STACKSIZE    	    4096
+#else
 #define IDTASK_STACKSIZE    	    (AROS_STACKSIZE + 10240)
+#endif
 
 /* Priority of the input.device task */
 #define IDTASK_PRIORITY     	    20
@@ -61,6 +68,7 @@ struct inputbase
     UBYTE Prev1DownQual;
     UBYTE Prev2DownCode;
     UBYTE Prev2DownQual;
+    BOOL Stopped;
 };
 
 /* Prototypes */

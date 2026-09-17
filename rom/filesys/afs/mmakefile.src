@@ -10,19 +10,24 @@ FILES := main \
 	filehandles1 \
 	filehandles2 \
 	filehandles3 \
+	afs_security \
 	hashing \
 	misc \
 	os_aros_support \
 	volumes \
    	validator
 
-#MM- kernel-fs-afs : includes linklibs
+#MM- kernel-fs-afs : includes linklibs kernel-security-includes kernel-task-includes
 
 USER_CPPFLAGS := \
                -DUSE_EXEC_DEBUG \
 	       -D__INTUITION_NOLIBBASE__ \
 	       -DADATE="\"$(shell date '+%d.%m.%Y')\""
 USER_LDFLAGS := -static
+
+ifneq ($(ROM_OPTIMIZATION_CFLAGS),)
+OPTIMIZATION_CFLAGS := $(ROM_OPTIMIZATION_CFLAGS)
+endif
 
 %build_module mmake=kernel-fs-afs \
     modname=afs modtype=handler \

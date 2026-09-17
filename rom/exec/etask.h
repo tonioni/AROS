@@ -63,6 +63,10 @@ struct IntETask
     cpumask_t           *iet_CpuAffinity;        /* bitmap of cores this task can run on    */
     spinlock_t          *iet_SpinLock;          /* pointer to spinlock task is spinning on */
 #endif
+    /* Last CPU-usage sample, for arches that sweep iet_CpuUsage. */
+    UQUAD               iet_LastBusy;           /* iet_private2 at the last sample         */
+    UQUAD               iet_LastUsageStamp;     /* when that sample was taken              */
+    ULONG               iet_QuantumLeft;        /* scheduler ticks left of this task's slice */
 #ifdef DEBUG_ETASK
     STRPTR              iet_Me;
 #endif

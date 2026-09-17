@@ -528,7 +528,7 @@ static void __exec_do_regular(struct PosixCIntBase *PosixCBase)
         oldin = SelectInput(in->fcb->handle);
         inchanged = 1;
     }
-    if(out && in->fcb->handle != Output())
+    if(out && out->fcb->handle != Output())
     {
         oldout = SelectOutput(out->fcb->handle);
         outchanged = 1;
@@ -553,10 +553,21 @@ static void __exec_do_regular(struct PosixCIntBase *PosixCBase)
         }
     }
 
+    /* The hosted program's startup/shutdown rewires and then tears down the
+       per-task base pointers; our epilogue below (_Exit via the StdCBase
+       relwrapper) then jumped through NULL.  Preserve the launcher-owned
+       instances across the program's lifetime and restore them afterwards. */
+    struct StdCBase *savedstdc = PosixCBase->PosixCBase.StdCBase;
+    struct StdCIOBase *savedstdcio = PosixCBase->PosixCBase.StdCIOBase;
+
     D(bug("[__exec_do_regular] Running program, PosixCBase=%x\n", PosixCBase));
     returncode = RunCommand(
         PosixCBase->exec_seglist,
-        cli->cli_DefaultStack * CLI_DEFAULTSTACK_UNIT,
+        /* Launcher tasks (vfork children via CreateNewProc) may have no CLI;
+           Cli()==NULL here would be dereferenced at the stack-size argument.
+           Fall back to a generous fixed stack in that case. */
+        (cli ? cli->cli_DefaultStack * CLI_DEFAULTSTACK_UNIT
+             : 1024 * 1024),
         (STRPTR)PosixCBase->exec_args,
         strlen(PosixCBase->exec_args)
     );
@@ -581,6 +592,22 @@ static void __exec_do_regular(struct PosixCIntBase *PosixCBase)
 
     self->tc_Node.ln_Name = oldtaskname;
     SetProgramName((STRPTR)oldtaskname);
+
+    /* Restore into both the entry-time base and whatever base the task
+       resolves now: the relwrapper re-fetches the offset table per call, so
+       if the hosted program's lifecycle swapped this task's posixc instance,
+       the live slot is on the current one. */
+    PosixCBase->PosixCBase.StdCBase = savedstdc;
+    PosixCBase->PosixCBase.StdCIOBase = savedstdcio;
+    {
+        struct PosixCIntBase *curbase =
+            (struct PosixCIntBase *)__aros_getbase_PosixCBase();
+        if (curbase && curbase != PosixCBase)
+        {
+            curbase->PosixCBase.StdCBase = savedstdc;
+            curbase->PosixCBase.StdCIOBase = savedstdcio;
+        }
+    }
 
     __exec_cleanup(PosixCBase);
     

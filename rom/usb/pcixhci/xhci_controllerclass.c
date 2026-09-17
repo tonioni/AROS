@@ -319,6 +319,8 @@ takeownership:
     hc->hc_NumPorts = xhciPortLimit;
     xhcic->xhc_NumSlots = (ULONG)(hcsparams1 & 0xFF);
 
+    InitSemaphore(&xhcic->xhc_DevLock);
+
     pciusbXHCIDebug("xHCI", DEBUGCOLOR_SET "%d ports, %d slots" DEBUGCOLOR_RESET" \n",
                     hc->hc_NumPorts, xhcic->xhc_NumSlots);
 
@@ -449,8 +451,6 @@ takeownership:
                                                 pagesize);
         if(!xhcic->xhc_SPBuffersp) {
             pciusbError("xHCI", DEBUGWARNCOLOR_SET "xHCI: Unable to allocate Scratchpad Buffers" DEBUGCOLOR_RESET" \n");
-            if(xhcic->xhc_SPBA.me_Un.meu_Addr)
-                FREEPCIMEM(hc, hc->hc_PCIDriverObject, xhcic->xhc_SPBA.me_Un.meu_Addr);
             goto init_fail;
         }
 
@@ -483,6 +483,7 @@ takeownership:
 
 init_fail:
     if(xhcic) {
+        xhciFreeHCMem(hc, xhcic);
         FreeMem(xhcic, sizeof(*xhcic));
         hc->hc_CPrivate = NULL;
     }

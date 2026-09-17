@@ -35,9 +35,15 @@ CFILES := \
         platform_init \
         kernel_debug \
         getsystemattr \
+        timestamp \
         getcpucount \
+        alloccpumask \
+        clearcpumask \
+        cpuinmask \
+        freecpumask \
         getcpumask \
         getcpunumber \
+        schedulecpu \
         maygetchar \
         tags \
         intr \
@@ -75,15 +81,13 @@ kernel-raspi-armeb-quick: $(OSGENDIR)/boot/core.elf
 $(OSGENDIR)/boot/core.elf: $(KOBJSDIR)/kernel_resource.o $(KOBJSDIR)/exec_library.o  $(KOBJSDIR)/task_resource.o
 		@$(ECHO) "Creating   $@"
 		%mkdirs_q $(OSGENDIR)/boot
-		@$(TARGET_LD) -Map $(OSGENDIR)/boot/core.map -T $(SRCDIR)/$(CURDIR)/ldscript.lds -o $@ $^ -L$(AROS_LIB) -larossupport -lautoinit -llibinit -lstdc.static $(TARGET_C_LIBS)
+		@$(TARGET_LD) -Map $(OSGENDIR)/boot/core.map -T $(SRCDIR)/$(CURDIR)/ldscript.lds -o $@ $^ -L$(AROS_LIB) -larossupport -lautoinit -lamiga -llibinit -lstdc.static $(TARGET_C_LIBS)
 		@$(TARGET_STRIP) --strip-unneeded -R .note -R .comment $@
 
 #MM kernel-kernel-raspi-arm : includes
 #MM kernel-kernel-raspi-armeb : includes
 
 USER_INCLUDES := $(PRIV_KERNEL_INCLUDES) -I$(GENINCDIR) -I$(AROS_DEVELOPER)/include -I$(SRCDIR)/rom/openfirmware
-USER_CPPFLAGS := -DTARGET_SECTION_COMMENT=\"$(AROS_SECTION_COMMENT)\"
-
 %build_archspecific \
   mainmmake=kernel-kernel modname=kernel maindir=rom/kernel arch=raspi-arm \
   files="$(CFILES) $(PLATFILES)" asmfiles="$(AFILES)" compiler=kernel

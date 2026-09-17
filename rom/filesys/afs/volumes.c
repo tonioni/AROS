@@ -192,7 +192,14 @@ struct Volume *initVolume
                 else
                         volume->bootblocks=devicedef->de_Reserved;
                 volume->numbuffers = devicedef->de_NumBuffers;
+                /* Respect the device's transfer limit, if one is given */
+                volume->maxtransfer = 0xFFFFFFFF;
+                if ((devicedef->de_TableSize >= DE_MAXTRANSFER)
+                        && (devicedef->de_MaxTransfer != 0))
+                        volume->maxtransfer = devicedef->de_MaxTransfer;
+                D(bug("[afs] initVolume: MaxTransfer=%lu\n", volume->maxtransfer));
                 volume->blockcache=initCache(afsbase, volume, volume->numbuffers);
+                initBulkBuffer(afsbase, volume);
                 if (volume->blockcache != NULL)
                 {
                         if (openBlockDevice(afsbase, &volume->ioh)!= NULL)
@@ -237,6 +244,7 @@ struct Volume *initVolume
                                 *error=ERROR_NO_FREE_STORE;
                         }
                         freeCache(afsbase, volume->blockcache);
+                        freeBulkBuffer(afsbase, volume);
                 }
                 else
                 {
@@ -261,6 +269,7 @@ void uninitVolume(struct AFSBase *afsbase, struct Volume *volume) {
         osMediumFree(afsbase, volume, TRUE);
         if (volume->blockcache != NULL)
                 freeCache(afsbase, volume->blockcache);
+        freeBulkBuffer(afsbase, volume);
         closeBlockDevice(afsbase, &volume->ioh);
         FreeMem(volume,sizeof(struct Volume) + strlen(volume->ioh.blockdevice) + 1);
 }

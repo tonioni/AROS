@@ -23,8 +23,29 @@
 #define BWFM_MAX_UNITS          1
 #define ETHER_ADDR_LEN          6
 
-/* BWFMRxFrame() *info flag (low byte = SDPCM channel); mirrors bwfm_sdio.h. */
+/* BWFMRxFrame() *info flags (low byte = SDPCM channel); mirrors bwfm_sdio.h. */
 #define BWFM_RX_EVENT           0x100
+#define BWFM_RX_EVENT_LINKUP    0x200
+
+/* Firmware event types we act on; mirrors bwfm_scan.h. */
+#define BWFM_E_LINK             16
+#define BWFM_E_DEAUTH           5
+#define BWFM_E_DEAUTH_IND       6
+#define BWFM_E_DISASSOC         11
+#define BWFM_E_DISASSOC_IND     12
+#define BWFM_E_REASSOC          9
+#define BWFM_E_ROAM             19
+
+/* Firmware command for leaving the network; mirrors bwfm_sdio.h. */
+#define BWFM_C_DISASSOC         52
+#define BWFM_C_GET_RSSI         127
+
+/* Key slot algorithms for BWFMSetKey(); mirrors bwfm_sdio.h. */
+#define BWFM_CRYPTO_ALGO_OFF        0
+#define BWFM_CRYPTO_ALGO_WEP1       1
+#define BWFM_CRYPTO_ALGO_TKIP       2
+#define BWFM_CRYPTO_ALGO_WEP128     3
+#define BWFM_CRYPTO_ALGO_AES_CCM    4
 
 /* Per-opener state (one per OpenDevice) */
 struct bwfm_opener
@@ -45,6 +66,17 @@ struct bwfm_tracker
     struct Sana2PacketTypeStats stats;
 };
 
+/* Multicast groups we ask the firmware to let through. The chip filters in
+ * hardware, so this list is the whole story for IPv6 neighbour discovery and
+ * mDNS; beyond it we fall back to allmulti. */
+#define BWFM_MAX_MCAST      16
+
+struct bwfm_mcast
+{
+    UBYTE               addr[ETHER_ADDR_LEN];
+    ULONG               refs;               /* the stack adds a group per user */
+};
+
 /* Per-unit state */
 struct bwfm_unit
 {
@@ -59,6 +91,9 @@ struct bwfm_unit
     struct SignalSemaphore lock;        /* guards openers/read_pending/
                                          * event_pending/trackers/assoc_* and
                                          * pending_events across tasks (SMP) */
+    struct bwfm_mcast   mcast[BWFM_MAX_MCAST];
+    ULONG               mcast_count;
+    ULONG               mcast_over;         /* groups that did not fit -> allmulti */
     struct MinList      openers;
     struct MinList      trackers;
     struct MinList      event_pending;      /* queued S2_ONEVENT requests */
@@ -70,8 +105,10 @@ struct bwfm_unit
     int                 assoc_pending;
     ULONG               assoc_ssidlen;
     ULONG               assoc_passlen;
+    ULONG               assoc_ielen;
     UBYTE               assoc_ssid[33];
     UBYTE               assoc_pass[64];
+    UBYTE               assoc_ie[64];       /* WPA/RSN IE for the assoc request */
 };
 
 struct bwfm_base

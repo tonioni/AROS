@@ -42,6 +42,13 @@ nouveau_copy_init(ScreenPtr pScreen)
 		int engine;
 		Bool (*init)(NVPtr);
 	} methods[] = {
+		{ 0xcab5, 0, nouveau_copya0b5_init },
+		{ 0xc9b5, 0, nouveau_copya0b5_init },
+		{ 0xc8b5, 0, nouveau_copya0b5_init },
+		{ 0xc7b5, 0, nouveau_copya0b5_init },
+		{ 0xc6b5, 0, nouveau_copya0b5_init },
+		{ 0xc5b5, 0, nouveau_copya0b5_init },
+		{ 0xc3b5, 0, nouveau_copya0b5_init },
 		{ 0xc1b5, 0, nouveau_copya0b5_init },
 		{ 0xc0b5, 0, nouveau_copya0b5_init },
 		{ 0xb0b5, 0, nouveau_copya0b5_init },
@@ -88,6 +95,12 @@ nouveau_copy_init(ScreenPtr pScreen)
 	case NV_KEPLER:
 	case NV_MAXWELL:
 	case NV_PASCAL:
+	case NV_VOLTA:
+	case NV_TURING:
+	case NV_AMPERE:
+	case NV_HOPPER:
+	case NV_ADA:
+	case NV_BLACKWELL:
 		ret = nouveau_object_new(&pNv->dev->object, 0,
 					 NOUVEAU_FIFO_CHANNEL_CLASS,
 					 &(struct nve0_fifo) {
@@ -107,7 +120,7 @@ nouveau_copy_init(ScreenPtr pScreen)
 	}
 
 	ret = nouveau_pushbuf_new(pNv->client, pNv->ce_channel, 4,
-				  32 * 1024, true, &pNv->ce_pushbuf);
+				  32 * 1024, &pNv->ce_pushbuf);
 	if (ret) {
 		xf86DrvMsg(pScrn->scrnIndex, X_ERROR,
 			   "[COPY] error allocating pushbuf: %d\n", ret);
@@ -116,8 +129,13 @@ nouveau_copy_init(ScreenPtr pScreen)
 	}
 
 	while (method->init) {
+		/*
+		 * The handle must not collide with the main channel's copy
+		 * object (whose handle is the class): on GSP-RM parts every
+		 * object handle is unique per client, not per channel.
+		 */
 		ret = nouveau_object_new(pNv->ce_channel,
-					 method->engine << 16 | method->oclass,
+					 0x0ce00000 | method->engine << 16 | method->oclass,
 					 method->oclass, NULL, 0,
 					 &pNv->NvCopy);
 		if (ret == 0) {

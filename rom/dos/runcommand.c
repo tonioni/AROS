@@ -6,10 +6,13 @@
 
 #include <aros/debug.h>
 
-#include <exec/memory.h>
 #include <proto/exec.h>
-#include <utility/tagitem.h>
 #include <proto/dos.h>
+#define __M68KEMU_NOLIBBASE__
+#include <proto/m68kemu.h>
+
+#include <exec/memory.h>
+#include <utility/tagitem.h>
 #include <dos/stdio.h>
 
 #include "dos_intern.h"
@@ -76,15 +79,20 @@
     LONG ret;
 #if !(AROS_FLAVOUR & AROS_FLAVOUR_BINCOMPAT)
     IPTR elfinfo = 0;
+#if !defined(__mc68000__)
     IPTR hunkinfo = 0;
-    struct TagItem segtags[3] =
+#endif
+    struct TagItem segtags[] =
     {
         { GSLI_ElfHandle,       (IPTR)&elfinfo  },
+#if !defined(__mc68000__)
         { GSLI_68KHUNK,         (IPTR)&hunkinfo },
+#endif
         { TAG_DONE,             0               }
     };
 #endif
     D(BOOL injected;)
+    APTR seccookie = NULL;
 
     ASSERT_VALID_PROCESS(me);
 
@@ -95,8 +103,20 @@
         D(bug("[DOS] %s: elfinfo == 0x%p\n", __func__, elfinfo);)
         if (!elfinfo)
         {
+#if !defined(__mc68000__)
+            /* Route m68k hunk binaries through emulator */
+            if (hunkinfo) {
+                struct Library *M68KEmuBase = OpenLibrary("m68kemu.library", 0);
+                if (M68KEmuBase) {
+                    LONG m68k_ret = RunHunk(segList, stacksize, argptr, argsize);
+                    CloseLibrary(M68KEmuBase);
+                    return m68k_ret;
+                }
+            }
+#endif
+
             /* Segment is tracked by LoadSeg but is not ELF.
-             * Reject unsupported formats (e.g. 68k HUNK). */
+             * Reject unsupported formats (e.g. 68k HUNK without emulator). */
             return -1;
         }
     }
@@ -134,7 +154,14 @@
     args.Args[2] = (IPTR)BADDR(segList) + sizeof(BPTR);
     args.Args[3] = (IPTR)me;
 
+    /* Multi-user: a setuid executable runs with the owner of its file */
+    if (SECURITY_ACTIVE)
+        seccookie = secSetUIDBegin(segList);
+
     ret = NewStackSwap(&sss, CallEntry, &args);
+
+    if (seccookie)
+        secSetUIDEnd(seccookie);
 
     me->pr_ReturnAddr = oldReturnAddr;
     me->pr_Arguments  = oldargs;

@@ -217,7 +217,7 @@ BOOL parse_filename(struct filehandle *fh, char *filename, struct NewWindow *nw)
     UBYTE c;
     WORD paramid = 1;
     LONG paramval = 0;
-    BOOL ok = TRUE, done = FALSE, paramok = FALSE;
+    BOOL ok = TRUE, done = FALSE, paramok = FALSE, nodrag = FALSE;
 
     ASSERT_VALID_PTR(fh);
     ASSERT_VALID_PTR(nw);
@@ -317,6 +317,7 @@ BOOL parse_filename(struct filehandle *fh, char *filename, struct NewWindow *nw)
                     else if (!strnicmp(param, "NODRAG", paramlen))
                     {
                         nw->Flags &= ~WFLG_DRAGBAR;
+                        nodrag = TRUE;
                     }
                     else if (!strnicmp(param, "NOBORDER", paramlen))
                     {
@@ -383,6 +384,9 @@ BOOL parse_filename(struct filehandle *fh, char *filename, struct NewWindow *nw)
 
     } /* while (!done) */
 
+    if (nodrag)
+        nw->Flags &= ~WFLG_CLOSEGADGET;
+
     return ok;
 }
 
@@ -399,9 +403,9 @@ void do_write(struct filehandle *fh, APTR data, ULONG length)
 
 /******************************************************************************************/
 
-void do_movecursor(struct filehandle *fh, UBYTE direction, UBYTE howmuch)
+void do_movecursor(struct filehandle *fh, UBYTE direction, UWORD howmuch)
 {
-    UBYTE seq[6]; /* 9B <N> <N> <N> <dir> <0> */
+    UBYTE seq[8]; /* 9B <N...> <dir> <0> */
     ULONG size;
 
     if (howmuch > 0)
@@ -1011,7 +1015,7 @@ BOOL process_input(struct filehandle *fh)
             /* fall through */
 
         case INP_RETURN:
-            if (fh->inputsize < INPUTBUFFER_SIZE)
+            if (fh->inputsize <= INPUTBUFFER_SIZE)
             {
                 if (inp != INP_EOF)
                 {

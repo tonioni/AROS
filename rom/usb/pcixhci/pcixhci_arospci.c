@@ -411,15 +411,7 @@ void pciFreeUnit(struct PCIUnit *hu)
 
     //FIXME: (x/e/o/u)hciFree routines actually ONLY stops the chip NOT free anything as below...
     ForeachNode(&hu->hu_Controllers, hc) {
-        if(hc->hc_PCIMem.me_Un.meu_Addr) {
-            if(hc->hc_PCIMemIsExec) {
-                FreeMem(hc->hc_PCIMem.me_Un.meu_Addr, hc->hc_PCIMem.me_Length);
-                hc->hc_PCIMemIsExec = FALSE;
-            } else {
-                HIDD_PCIDriver_FreePCIMem(hc->hc_PCIDriverObject, hc->hc_PCIMem.me_Un.meu_Addr);
-            }
-            hc->hc_PCIMem.me_Un.meu_Addr = NULL;
-        }
+        pciFreeAligned(hc, &hc->hc_PCIMem);
     }
 
     // disable and free board
@@ -475,8 +467,6 @@ void pciExpunge(struct PCIDevice *hd)
 
 BOOL PCIXAddInterrupt(struct PCIController *hc, struct Interrupt *interrupt)
 {
-    struct PCIDevice *hd = hc->hc_Device;
-
     return HIDD_PCIDevice_AddInterrupt(hc->hc_PCIDeviceObject, interrupt);
 }
 
@@ -504,10 +494,21 @@ APTR pciAllocAligned(struct PCIController *hc, struct MemEntry *alloc, ULONG Siz
 }
 /* \\\ */
 
+/* /// "pciFreeAligned()" */
+void pciFreeAligned(struct PCIController *hc, struct MemEntry *alloc)
+{
+    if(!alloc->me_Un.meu_Addr)
+        return;
+
+    FREEPCIMEM(hc, hc->hc_PCIDriverObject, alloc->me_Un.meu_Addr);
+    alloc->me_Un.meu_Addr = NULL;
+    alloc->me_Length = 0;
+}
+/* \\\ */
+
 /* /// "pciGetPhysical()" */
 APTR pciGetPhysical(struct PCIController *hc, APTR virtaddr)
 {
-    //struct PCIDevice *hd = hc->hc_Device;
     return(HIDD_PCIDriver_CPUtoPCI(hc->hc_PCIDriverObject, virtaddr));
 }
 /* \\\ */

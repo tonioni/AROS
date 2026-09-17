@@ -34,6 +34,7 @@ CXXFLAGS_CXX20                          := @aros_cxxflags_cxx20@
 CXXFLAGS_GNU20                          := @aros_cxxflags_gnu20@
 CXXFLAGS_CXX23                          := @aros_cxxflags_cxx23@
 CXXFLAGS_GNU23                          := @aros_cxxflags_gnu23@
+CXXFLAGS_LIFETIME_DSE1                  := @aros_cxxflags_lifetime_dse1@
 
 CXXFLAGS_NOSTDLIBXX                     := @aros_cxxflags_nostdlibxx@
 
@@ -57,6 +58,7 @@ CFLAGS_NO_FLOAT_STORE                   := @aros_cflags_no_float_store@
 
 # Auto vectorize
 CFLAGS_TREE_VECTORIZE                   := @aros_cflags_tree_vectorize@
+CFLAGS_NO_VECTORIZE                     := @aros_cflags_no_vectorize@
 
 #
 # LTO/Graphite optimization flags

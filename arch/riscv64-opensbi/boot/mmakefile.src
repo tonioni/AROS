@@ -29,6 +29,7 @@ include $(SRCDIR)/config/aros.cfg
 #MM     kernel-processor \
 #MM     kernel-dos \
 #MM     kernel-dos64 \
+#MM     kernel-security \
 #MM     kernel-dosboot \
 #MM     kernel-bootloader \
 #MM     kernel-filesystem \
@@ -58,6 +59,7 @@ include $(SRCDIR)/config/aros.cfg
 #MM     kernel-fs-afs \
 #MM     kernel-fs-cdvdfs \
 #MM     kernel-fs-sfs \
+#MM     kernel-fs-pfs3 \
 #MM     kernel-fs-fat \
 #MM     kernel-log \
 #MM     kernel-entropy \
@@ -92,7 +94,7 @@ include $(SRCDIR)/config/aros.cfg
 #MM     kernel-usb-classes-bootkeyboard \
 #MM     kernel-usb-classes-bootmouse
 
-BSP_LIBS      := aros oop utility dos dos64 graphics layers intuition keymap \
+BSP_LIBS      := aros oop utility dos dos64 security graphics layers intuition keymap \
                  partition cgxbootpic gadtools acpica poseidon
 BSP_LIBS_ARCH := expansion debug
 BSP_RSRC      := bootloader dosboot FileSystem lddemon misc shell \
@@ -103,7 +105,7 @@ BSP_DEVS      := console input gameport keyboard nvme virtio \
 BSP_DEVS_ARCH := timer
 BSP_USBCLASSES := USB/hub USB/hubss USB/hid USB/bootkeyboard USB/bootmouse \
                   USB/massstorage
-BSP_HANDLERS  := ram con afs cdrom sfs fat
+BSP_HANDLERS  := ram con afs cdrom sfs pfs3 fat
 BSP_HIDDS     := hiddclass inputclass gfx efifbgfx keyboard mouse bus pci pcidt \
                  storage system power telemetry ipmi dwuart i2c dwi2c \
                  acpiacad acpibattery acpifan acpibutton acpithermal \

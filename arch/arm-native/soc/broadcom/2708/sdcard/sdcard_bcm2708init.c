@@ -18,6 +18,11 @@
 #include <hardware/arasan.h>
 #include <hardware/videocore.h>
 
+/* The BCM2712 mailbox sits at +0x13880, not the BCM283x/2711 +0xB880 */
+#undef VCMB_BASE
+#define VCMB_BASE ((IPTR)__arm_periiobase + \
+    (((IPTR)__arm_periiobase == BCM2712_PERIIOBASE) ? 0x13880 : 0xB880))
+
 extern APTR     MBoxBase;
 extern IPTR     __arm_periiobase;
 
@@ -69,6 +74,9 @@ static void FNAME_BCMSDC(SDBusPostIRQInit)(struct sdcard_Bus *bus)
 static void FNAME_BCMSDC(SDSetBusWidth)(UBYTE width, struct sdcard_Bus *bus)
 {
     UBYTE sdcHostCtrl = bus->sdcb_IOReadByte(SDHCI_HOST_CONTROL, bus);
+
+    DINIT(bug("[SDCard--] %s: %u-bit bus width\n", __PRETTY_FUNCTION__, width));
+
     if (width == 4)
         sdcHostCtrl |= SDHCI_HCTRL_4BITBUS;
     else
@@ -91,8 +99,8 @@ static int FNAME_BCMSDC(BCM2708Init)(struct SDCardBase *SDCardBase)
 
     __arm_periiobase = KrnGetSystemAttr(KATTR_PeripheralBase);
 
-    isEMMC2 = (__arm_periiobase == BCM2711_PERIIOBASE);
-    if (isEMMC2)
+    isEMMC2 = (__arm_periiobase == BCM2711_PERIIOBASE || __arm_periiobase == BCM2712_PERIIOBASE);
+    if (__arm_periiobase == BCM2711_PERIIOBASE)
     {
         /*
          * The card slot sits on EMMC2, but the legacy window is still wired
@@ -107,7 +115,13 @@ static int FNAME_BCMSDC(BCM2708Init)(struct SDCardBase *SDCardBase)
         }
     }
 
-    if (isEMMC2)
+    if (__arm_periiobase == BCM2712_PERIIOBASE)
+    {
+        ctrlBase  = BCM2712_EMMC2_BASE;
+        ctrlClock = VCCLOCK_EMMC2;
+        ctrlIRQ   = IRQ_BCM2712_SDHCI;
+    }
+    else if (isEMMC2)
     {
         ctrlBase  = EMMC2_BASE;
         ctrlClock = VCCLOCK_EMMC2;
@@ -228,6 +242,9 @@ bcminit_clock:
             if (MBoxRead((APTR)VCMB_BASE, VCMB_PROPCHAN) == MBoxMessage)
                 __BCM2708Bus->sdcb_ClockMax = AROS_LE2LONG(MBoxMessage[6]);
 
+            if (__BCM2708Bus->sdcb_ClockMax == 0)
+                __BCM2708Bus->sdcb_ClockMax = 200000000;
+
             DINIT(bug("[SDCard--] %s: clock was parked, max rate %d Hz\n",
                       __PRETTY_FUNCTION__, __BCM2708Bus->sdcb_ClockMax));
         }
@@ -237,6 +254,7 @@ bcminit_clock:
         __BCM2708Bus->sdcb_IOReadByte = FNAME_BCMSDCBUS(BCMMMIOReadByte);
         __BCM2708Bus->sdcb_IOReadWord = FNAME_BCMSDCBUS(BCMMMIOReadWord);
         __BCM2708Bus->sdcb_IOReadLong = FNAME_BCMSDCBUS(BCMMMIOReadLong);
+        __BCM2708Bus->sdcb_IOReadLongs = FNAME_BCMSDCBUS(BCMMMIOReadLongs);
 
         if (isEMMC2)
         {
@@ -317,6 +335,13 @@ bcminit_clock:
                 else
                     DINIT(bug("[SDCard--] %s: controller reports no base clock, keeping the mailbox rate\n", __PRETTY_FUNCTION__));
             }
+
+            DINIT(bug("[SDCard--] %s: %s @ 0x%p: base clock %uMHz, caps 0x%08x, host spec %u%s%s\n",
+                        __PRETTY_FUNCTION__, isEMMC2 ? "EMMC2" : "Arasan", (APTR)ctrlBase,
+                        __BCM2708Bus->sdcb_ClockMax / 1000000, __BCM2708Bus->sdcb_Capabilities,
+                        (__BCM2708Bus->sdcb_Version & 0xFF) + 1,
+                        (__BCM2708Bus->sdcb_Capabilities & SDHCI_CAN_DO_ADMA2) ? ", ADMA2" : "",
+                        (__BCM2708Bus->sdcb_Capabilities & SDHCI_CAN_DO_HISPD) ? ", HISPD" : ""));
 
             DINIT(bug("[SDCard--] %s: SDHC Base Clock Rate : %dMHz\n", __PRETTY_FUNCTION__, __BCM2708Bus->sdcb_ClockMax / 1000000));
             DINIT(bug("[SDCard--] %s: SDHC Min Clock Rate : %dHz (hardcoded)\n", __PRETTY_FUNCTION__, __BCM2708Bus->sdcb_ClockMin));

@@ -700,6 +700,7 @@ static void writeresident(FILE *out, struct config *cfg)
         case IMAGE:
         case DATATYPE:
         case USBCLASS:
+        case BTCLASS:
         case HIDD:
             fprintf(out, "    NT_LIBRARY,\n");
             break;
@@ -976,6 +977,31 @@ static void writeinitlib(FILE *out, struct config *cfg)
     if (cfg->handlerlist)
         writehandler(out, cfg);
 
+    /* Per-module set descriptor - see struct __aros_libinit_sets. Handlers
+       return before ever using it, so do not emit an unused table for them. */
+    if (cfg->modtype != HANDLER)
+    {
+        fprintf(out,
+                "static const struct __aros_libinit_sets GM_UNIQUENAME(InitSets) =\n"
+                "{\n"
+        );
+        fprintf(out, "    %s,\n", (cfg->options & OPTION_NOAUTOLIB) ? "NULL" : "SETNAME(LIBS)");
+        fprintf(out, "    %s,\n", cfg->rellibs ? "SETNAME(RELLIBS)" : "NULL");
+        fprintf(out, "    SETNAME(INIT),\n");
+        fprintf(out, "    %s,\n", (cfg->classlist != NULL) ? "SETNAME(CLASSESINIT)" : "NULL");
+        fprintf(out,
+                "    SETNAME(CTORS),\n"
+                "    SETNAME(INIT_ARRAY),\n"
+                "    SETNAME(INITLIB),\n"
+                "    SETNAME(EXPUNGELIB),\n"
+                "    SETNAME(FINI_ARRAY),\n"
+                "    SETNAME(DTORS),\n"
+                "    SETNAME(EXIT),\n"
+        );
+        fprintf(out, "    %s\n", (cfg->classlist != NULL) ? "SETNAME(CLASSESEXPUNGE)" : "NULL");
+        fprintf(out, "};\n\n");
+    }
+
     fprintf(out,
             "extern const LONG __aros_libreq_SysBase __attribute__((weak));\n"
             "\n"
@@ -1007,7 +1033,6 @@ static void writeinitlib(FILE *out, struct config *cfg)
     fprintf(out,
             "\n"
             "    int ok;\n"
-            "    int initcalled = 0;\n"
     );
     /* Set the global SysBase, needed for __aros_setoffsettable()/__aros_getoffsettable() */
     if (cfg->options & OPTION_DUPBASE)
@@ -1120,45 +1145,14 @@ static void writeinitlib(FILE *out, struct config *cfg)
         fprintf(out, "    GM_SEGLIST_FIELD(LIBBASE) = segList;\n");
     if (cfg->options & OPTION_DUPBASE)
         fprintf(out, "    GM_ROOTBASE_FIELD(LIBBASE) = (LIBBASETYPEPTR)LIBBASE;\n");
-    fprintf(out, "    if (");
-    if (!(cfg->options & OPTION_NOAUTOLIB))
-        fprintf(out, "set_open_libraries() && ");
-    if (cfg->rellibs)
-        fprintf(out, "set_open_rellibraries(LIBBASE) && ");
+    /* The whole open/init/rollback sequence now lives in _set_libinit(),
+       driven by the descriptor emitted above. */
     fprintf(out,
-            "set_call_funcs(SETNAME(INIT), 1, 1) &&"
-    );
-    if (cfg->classlist != NULL)
-        fprintf(out, "set_call_libfuncs(SETNAME(CLASSESINIT), 1, 1, LIBBASE) && ");
-    fprintf(out,
-            "1)\n"
-            "    {\n"
-            "        set_call_funcs(SETNAME(CTORS), -1, 0);\n"
-            "        set_call_funcs(SETNAME(INIT_ARRAY), 1, 0);\n"
-            "\n"
-    );
-
-    fprintf(out,
-            "        initcalled = 1;\n"
-            "        ok = set_call_libfuncs(SETNAME(INITLIB), 1, 1, LIBBASE);\n"
-            "    }\n"
-            "    else\n"
-            "        ok = 0;\n"
+            "    ok = set_libinit(&GM_UNIQUENAME(InitSets), LIBBASE);\n"
             "\n"
             "    if (!ok)\n"
             "    {\n"
-            "        if (initcalled)\n"
-            "            set_call_libfuncs(SETNAME(EXPUNGELIB), -1, 0, LIBBASE);\n"
-            "        set_call_funcs(SETNAME(FINI_ARRAY), -1, 0);\n"
-            "        set_call_funcs(SETNAME(DTORS), 1, 0);\n"
-            "        set_call_funcs(SETNAME(EXIT), -1, 0);\n"
     );
-    if (cfg->classlist != NULL)
-        fprintf(out, "        set_call_libfuncs(SETNAME(CLASSESEXPUNGE), -1, 0, LIBBASE);\n");
-    if (cfg->rellibs)
-        fprintf(out, "        set_close_rellibraries(LIBBASE);\n");
-    if (!(cfg->options & OPTION_NOAUTOLIB))
-        fprintf(out, "        set_close_libraries();\n");
 
     if (cfg->options & OPTION_RESAUTOINIT)
     {
@@ -1325,7 +1319,14 @@ static void writeopenlib(FILE *out, struct config *cfg)
                         "    if (newlib)\n"
                         "    {\n"
                         "        struct __GM_DupBase *dupbase = (struct __GM_DupBase *)newlib;\n"
-                        "        if (dupbase->task != thistask)\n"
+                        "        /* The slot may still name a dup that another task closed and\n"
+                        "           freed (an expunge sweep closing the bases a library init\n"
+                        "           opened, for instance), or a dup of an earlier incarnation of\n"
+                        "           this library that got the same slot id. A dup is a copy of\n"
+                        "           the root it was made from, so its name pointer identifies\n"
+                        "           that root; anything else is stale and must not be reused. */\n"
+                        "        if (dupbase->task != thistask\n"
+                        "            || ((struct Library *)newlib)->lib_Node.ln_Name != ((struct Library *)LIBBASE)->lib_Node.ln_Name)\n"
                         "            newlib = NULL;\n"
                         "        else if (thistask->tc_Node.ln_Type == NT_PROCESS\n"
                         "                 && dupbase->retaddr != ((struct Process *)thistask)->pr_ReturnAddr\n"
@@ -1479,7 +1480,13 @@ static void writecloselib(FILE *out, struct config *cfg)
         );
         if (cfg->options & OPTION_PERTASKBASE)
             fprintf(out,
-                    "    __GM_SetPerTaskBase(((struct __GM_DupBase *)LIBBASE)->oldpertaskbase);\n"
+                    "    /* Only the owning task's slot chain is ours to unwind. When another\n"
+                    "       task closes this dup (an expunge sweep, typically) its own slot\n"
+                    "       must be left alone; the owner's slot keeps pointing here, so mark\n"
+                    "       the dup dead before it is freed so OpenLib rejects it. */\n"
+                    "    if (dupbase->task == FindTask(NULL))\n"
+                    "        __GM_SetPerTaskBase(dupbase->oldpertaskbase);\n"
+                    "    dupbase->task = NULL;\n"
             );
         fprintf(out,
                 "    __freebase(LIBBASE);\n"
@@ -1553,17 +1560,10 @@ static void writeexpungelib(FILE *out, struct config *cfg)
                 "\n"
                 "        Remove((struct Node *)LIBBASE);\n"
                 "\n"
-                "        set_call_funcs(SETNAME(FINI_ARRAY), -1, 0);\n"
-                "        set_call_funcs(SETNAME(DTORS), 1, 0);\n"
-                "        set_call_funcs(SETNAME(EXIT), -1, 0);\n"
+                "        set_libexpunge(&GM_UNIQUENAME(InitSets), LIBBASE);\n"
         );
-        if (cfg->classlist != NULL)
-            fprintf(out, "        set_call_libfuncs(SETNAME(CLASSESEXPUNGE), -1, 0, LIBBASE);\n");
-        if (cfg->rellibs)
-            fprintf(out, "        set_close_rellibraries(LIBBASE);\n");
         if (!(cfg->options & OPTION_NOAUTOLIB))
-            fprintf(out, "        set_close_libraries();\n"
-                         "#ifdef GM_OOPBASE_FIELD\n"
+            fprintf(out, "#ifdef GM_OOPBASE_FIELD\n"
                          "        CloseLibrary((struct Library *)GM_OOPBASE_FIELD(LIBBASE));\n"
                          "#endif\n"
                     );

@@ -1,5 +1,5 @@
 /*
-    Copyright 2010-2017, The AROS Development Team. All rights reserved.
+    Copyright 2010-2026, The AROS Development Team. All rights reserved.
 */
 
 #include "nouveau_intern.h"
@@ -41,6 +41,12 @@ HIDDNouveauWrapResource(struct CardData * carddata, struct pipe_resource * resou
         case NV_KEPLER:
         case NV_MAXWELL:
         case NV_PASCAL:
+        case NV_VOLTA:
+        case NV_TURING:
+        case NV_AMPERE:
+        case NV_HOPPER:
+        case NV_ADA:
+        case NV_BLACKWELL:
             bo = nv50_miptree(resource)->base.bo;
             pitch = nv50_miptree(resource)->level[0].pitch;
             break;
@@ -163,6 +169,10 @@ APTR METHOD(NouveauGallium, Hidd_Gallium, CreatePipeScreen)
     case 0x110:
     case 0x120:
     case 0x130:
+    case 0x140:
+    case 0x160:
+    case 0x170:
+    case 0x190:
         init = nvc0_screen_create;
         break;
     default:
@@ -172,13 +182,18 @@ APTR METHOD(NouveauGallium, Hidd_Gallium, CreatePipeScreen)
     }
 
     LOCK_ENGINE
-
     screen = init(dev);
     if (!screen) {
         UNLOCK_ENGINE
         return NULL;
     }
-
+    if (!screen->base.context_create) {
+        screen->base.destroy(&screen->base);
+        UNLOCK_ENGINE
+        return NULL;
+    }
+    /* what the drm winsys would have done for us */
+    screen->initialized = true;
     UNLOCK_ENGINE
 
     return screen;
@@ -230,6 +245,12 @@ VOID METHOD(NouveauGallium, Hidd_Gallium, DisplayResource)
     case NV_KEPLER:
     case NV_MAXWELL:
     case NV_PASCAL:
+    case NV_VOLTA:
+    case NV_TURING:
+    case NV_AMPERE:
+    case NV_HOPPER:
+    case NV_ADA:
+    case NV_BLACKWELL:
         HIDDNouveauNVC0CopySameFormat(carddata, &srcdata, dstdata, 
             msg->srcx, msg->srcy, msg->dstx, msg->dsty, msg->width, msg->height, 
             0x03 /* vHidd_GC_DrawMode_Copy */);

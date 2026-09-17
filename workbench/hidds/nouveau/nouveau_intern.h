@@ -12,6 +12,12 @@
 
 #include <nouveau.h>
 
+/* The DRM file descriptor now lives in the nouveau_drm root object */
+#define NOUVEAU_DEV_FD(dev)         (nouveau_drm(&(dev)->object)->fd)
+/* drm-aros: the caller maintains this buffer's CPU cache for the ranges it exchanges */
+extern int drmNouveauBoSelfSync(int fd, uint32_t handle);
+#define NOUVEAU_DEV_DRM_VERSION(dev) (nouveau_drm(&(dev)->object)->version)
+
 #include LC_LIBDEFS_FILE
 
 #define CLID_Hidd_Gfx_Nouveau           "hidd.gfx.nouveau"
@@ -74,6 +80,9 @@ struct HIDDNouveauBitMapData
 
     ULONG   pitch;          /* Width of single data row in bytes */
     UBYTE   bytesperpixel;  /* In bytes, how many bytes to store a pixel */
+    BOOL    gpu_dirty;      /* Engine work targeting this bo has been queued
+                               and not yet waited for. Any CPU access via the
+                               mapping must sync first (MAP_BUFFER does). */
     struct
     {
         ULONG height;           /* Height of bitmap in pixels */
@@ -165,13 +174,19 @@ struct CardData
             int, int, int,
             struct nouveau_bo *, uint32_t, int, int, int, int, int,
             struct nouveau_bo *, uint32_t, int, int, int, int, int);
+    BOOL (*ce_fill)(struct nouveau_pushbuf *, struct nouveau_object *, int,
+            struct nouveau_bo *, uint32_t, int, int, int, int, int, int,
+            uint32_t);
 
     struct nouveau_bo       *GART;                  /* Buffer in GART for upload/download of images */
+    ULONG gart_pos;         /* Ring position in the GART buffer: uploads stream
+                               without waiting until the ring wraps */
     struct SignalSemaphore  gartsemaphore;
 };
 
 struct staticdata
 {
+    char hardwarename[64];
     OOP_Class       *basegc;            /* baseclass for CreateObject */
     OOP_Class       *basebm;            /* baseclass for CreateObject */
     OOP_Class       *basegallium;            /* baseclass for CreateObject */
@@ -248,7 +263,42 @@ LIBBASETYPE
 #define LOCK_MULTI_BITMAP           { ObtainSemaphore(&(SD(cl))->multibitmapsemaphore); }
 #define UNLOCK_MULTI_BITMAP         { ReleaseSemaphore(&(SD(cl))->multibitmapsemaphore); }
 
-#define MAP_BUFFER                  { if (!bmdata->bo->map) nouveau_bo_map(bmdata->bo, NOUVEAU_BO_RDWR, carddata->client); }
+void nouveau_compat_log(const char *fmt, ...);
+#define nvlog nouveau_compat_log
+
+/* Engine work is submitted lazily; a result nobody syncs for (the
+   last operation on a visible bitmap) still has to reach the display,
+   so anything queued for a displayable bitmap is kicked right away.
+   Off-screen work is carried along by the on-screen blit that consumes
+   it, or by the sync of a CPU access. */
+static inline VOID HIDDNouveauFlushDisplayable(struct CardData *carddata,
+    struct HIDDNouveauBitMapData *bmdata)
+{
+    if (!bmdata->displayable)
+        return;
+    if (carddata->pushbuf)
+        nouveau_pushbuf_kick(carddata->pushbuf);
+    if (carddata->ce_enabled && carddata->ce_pushbuf)
+        nouveau_pushbuf_kick(carddata->ce_pushbuf);
+}
+
+/* The staging buffer's CPU mapping is cached; these keep the rows a
+   transfer exchanges coherent with the engine, and only those rows. */
+#include <proto/exec.h>
+#include <exec/memory.h>
+static inline VOID nouveau_staging_to_gpu(APTR p, ULONG len)
+{
+    ULONG l = len;
+    CachePreDMA(p, &l, DMA_ReadFromRAM);
+}
+static inline VOID nouveau_staging_from_gpu(APTR p, ULONG len)
+{
+    ULONG l = len;
+    CachePostDMA(p, &l, 0);
+}
+
+#define MAP_BUFFER                  { if (!bmdata->bo->map) nouveau_bo_map(bmdata->bo, NOUVEAU_BO_RDWR, carddata->client); \
+                                      if (bmdata->gpu_dirty) { nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RDWR, carddata->client); bmdata->gpu_dirty = FALSE; } }
 
 #define IS_NOUVEAU_BM_CLASS(x)      ((x) == SD(cl)->bmclass)
 
@@ -262,10 +312,10 @@ LIBBASETYPE
 #define __nv_io_ar()                do { } while (0)
 #endif
 
-#define writel(val, addr)           ({ __nv_io_bw(); *(volatile ULONG*)(addr) = (val); })
-#define readl(addr)                 ({ ULONG __iol = *(volatile ULONG*)(addr); __nv_io_ar(); __iol; })
-#define writew(val, addr)           ({ __nv_io_bw(); *(volatile UWORD*)(addr) = (val); })
-#define readw(addr)                 ({ UWORD __iow = *(volatile UWORD*)(addr); __nv_io_ar(); __iow; })
+#define hidd_writel(val, addr)      ({ __nv_io_bw(); *(volatile ULONG*)(IPTR)(addr) = (val); })
+#define hidd_readl(addr)            ({ ULONG __iol = *(volatile ULONG*)(IPTR)(addr); __nv_io_ar(); __iol; })
+#define hidd_writew(val, addr)      ({ __nv_io_bw(); *(volatile UWORD*)(IPTR)(addr) = (val); })
+#define hidd_readw(addr)            ({ UWORD __iow = *(volatile UWORD*)(IPTR)(addr); __nv_io_ar(); __iow; })
 
 enum DMAObjects 
 {
@@ -302,6 +352,12 @@ enum DMAObjects
 #define NV_KEPLER   0xe0
 #define NV_MAXWELL  0x110
 #define NV_PASCAL   0x130
+#define NV_VOLTA    0x140
+#define NV_TURING   0x160
+#define NV_AMPERE   0x170
+#define NV_HOPPER   0x180
+#define NV_ADA      0x190
+#define NV_BLACKWELL 0x1a0
 
 #define BLENDOP_SOLID           1
 #define BLENDOP_ALPHA_PREMULT   3
@@ -309,6 +365,7 @@ enum DMAObjects
 
 /* nv_accel_common.c */
 BOOL HIDDNouveauAccelCommonInit(struct CardData * carddata);
+VOID HIDDNouveauAccelShutdown(struct CardData *carddata);
 BOOL HIDDNouveauAccelAllocSurface(struct CardData *carddata, ULONG width, ULONG height, UBYTE bpp, ULONG *pitch,
     struct nouveau_bo **bo);
 
@@ -360,6 +417,11 @@ VOID HIDDNouveauNVC0SetPattern(struct CardData * carddata, LONG clr0, LONG clr1,
 BOOL HIDDNouveauNVC0FillSolidRect(struct CardData * carddata,
     struct HIDDNouveauBitMapData * bmdata, LONG minX, LONG minY, LONG maxX,
     LONG maxY, ULONG drawmode, ULONG color);
+typedef VOID (*HIDDNouveauStagingFn)(APTR rows, ULONG pitch, LONG line0,
+    LONG lines, APTR ctx);
+BOOL HIDDNouveauNVC0StagingRect(struct CardData *carddata,
+    struct HIDDNouveauBitMapData *bmdata, LONG x, LONG y, LONG w, LONG h,
+    HIDDNouveauStagingFn fn, APTR ctx);
 BOOL HIDDNouveauNVC0CopySameFormat(struct CardData * carddata,
     struct HIDDNouveauBitMapData * srcdata, struct HIDDNouveauBitMapData * destdata,
     LONG srcX, LONG srcY, LONG destX, LONG destY, LONG width, LONG height,
@@ -384,14 +446,14 @@ BOOL HiddNouveauAccelAPENUpload3D(
     UBYTE * srcalpha, BOOL srcinvertalpha, ULONG srcpitch, ULONG srcpenrgb,
     LONG x, LONG y, LONG width, LONG height, 
     OOP_Class *cl, OOP_Object *o);
-VOID HIDDNouveauBitMapPutAlphaImage32(struct HIDDNouveauBitMapData * bmdata,
+VOID HIDDNouveauBitMapPutAlphaImage32(APTR dstmap, ULONG dstpitch,
     APTR srcbuff, ULONG srcpitch, LONG destX, LONG destY, LONG width, LONG height);
-VOID HIDDNouveauBitMapPutAlphaImage16(struct HIDDNouveauBitMapData * bmdata,
+VOID HIDDNouveauBitMapPutAlphaImage16(APTR dstmap, ULONG dstpitch,
     APTR srcbuff, ULONG srcpitch, LONG destX, LONG destY, LONG width, LONG height);
-VOID HIDDNouveauBitMapPutAlphaTemplate32(struct HIDDNouveauBitMapData * bmdata,
+VOID HIDDNouveauBitMapPutAlphaTemplate32(APTR dstmap, ULONG dstpitch,
     OOP_Object * gc, OOP_Object * bm, BOOL invertalpha,
     UBYTE * srcalpha, ULONG srcpitch, LONG destX, LONG destY, LONG width, LONG height);
-VOID HIDDNouveauBitMapPutAlphaTemplate16(struct HIDDNouveauBitMapData * bmdata,
+VOID HIDDNouveauBitMapPutAlphaTemplate16(APTR dstmap, ULONG dstpitch,
     OOP_Object * gc, OOP_Object * bm, BOOL invertalpha,
     UBYTE * srcalpha, ULONG srcpitch, LONG destX, LONG destY, LONG width, LONG height);
 VOID HIDDNouveauBitMapDrawSolidLine(struct HIDDNouveauBitMapData * bmdata,
@@ -416,6 +478,8 @@ struct pci_dev;
 extern struct pci_dev *nouveau_init_findcard(void);
 extern int nouveau_init_probe(struct pci_dev *pdev);
 extern int nouveau_init(void);
+extern void nouveau_shutdown(void);
+extern volatile int nouveau_shutting_down;
 
 /* Commom memory allocation */
 APTR HIDDNouveauAlloc(ULONG size);

@@ -18,42 +18,19 @@
 #include <exec/execbase.h>
 #include <libraries/ahi_sub.h>
 #include <aros/macros.h>
+
+#define DEBUG 0
 #include <aros/debug.h>
 
 #include "DriverData.h"
 #include "library.h"
 #include "rpihdmi-hwaccess.h"
+#include "rpihdmi-iec958.h"
+#include "rpihdmi-dma.h"
 
-#define dd ((struct RPiHDMIData *) AudioCtrl->ahiac_DriverData)
-
-
-/******************************************************************************
-** DMA interrupt handler ******************************************************
-******************************************************************************/
-
-/*
- * This is called from the DMA IRQ context via KrnAddIRQHandler.
- * We acknowledge the DMA interrupt and signal the slave task.
- */
 #undef SysBase
 
-void dma_irq_handler(struct RPiHDMIData *data, void *data2)
-{
-    struct ExecBase *SysBase = (struct ExecBase *) data2;
-    ULONG dma_base = data->periiobase + 0x007000 + data->dma_channel * 0x100;
-    ULONG cs = rd32le(dma_base + 0x00);
-
-    if (cs & DMA_CS_INT) {
-        /* Must carry the run state, not just ACTIVE: the AXI priorities
-         * share the register. See bcm2708_dma.h. */
-        wr32le(dma_base + 0x00, BCM2708_DMA_CS_ACK);
-
-        if (data->slavetask != NULL && data->slavesignal != -1) {
-            Signal((struct Task *) data->slavetask, 1L << data->slavesignal);
-        }
-    }
-}
-
+#define dd ((struct RPiHDMIData *) AudioCtrl->ahiac_DriverData)
 
 /******************************************************************************
 ** The slave process **********************************************************
@@ -166,8 +143,6 @@ void Slave(struct ExecBase *SysBase)
                  * (and staying out of phase permanently).
                  */
                 {
-                    ULONG dma_base = dd->periiobase + 0x007000 + dd->dma_channel * 0x100;
-                    ULONG cbaddr = rd32le(dma_base + 0x04);
                     ULONG fillbuf;
                     ULONG frames = AudioCtrl->ahiac_BuffSamples;
 
@@ -175,10 +150,8 @@ void Slave(struct ExecBase *SysBase)
                     if (frames == 0 || frames > AudioCtrl->ahiac_MaxBuffSamples)
                         frames = AudioCtrl->ahiac_MaxBuffSamples;
 
-                    if (cbaddr == GPU_BUS_ADDR(dd->cb[0]))
-                        fillbuf = 1; /* DMA on CB[0] → fill dmabuf[1] */
-                    else
-                        fillbuf = 0; /* DMA on CB[1] → fill dmabuf[0] */
+                    /* Fill the buffer the engine is NOT reading. */
+                    fillbuf = dma_active_cb(dd) ? 0 : 1;
 
                     /*
                      * Encode exactly the frames the mixer produced (the
@@ -198,7 +171,7 @@ void Slave(struct ExecBase *SysBase)
                     CacheClearE(dd->dmabuf[fillbuf], frames * 2 * sizeof(ULONG), CACRF_ClearD);
 
                     /* Play exactly the encoded frames (see PWM driver notes). */
-                    dd->cb[fillbuf]->txfr_len = frames * 2 * sizeof(ULONG);
+                    dma_set_txfr_len(dd, fillbuf, frames * 2 * sizeof(ULONG));
                     CacheClearE(dd->cb[fillbuf], sizeof(struct BCM2708DMACB), CACRF_ClearD);
                 }
             }

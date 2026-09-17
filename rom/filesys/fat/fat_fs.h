@@ -2,7 +2,7 @@
  * fat-handler - FAT12/16/32 filesystem handler
  *
  * Copyright (C) 2006 Marek Szyprowski
- * Copyright (C) 2007-2018 The AROS Development Team
+ * Copyright (C) 2007-2026 The AROS Development Team
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the same terms as AROS itself.
@@ -219,6 +219,11 @@ struct FSSuper
     ULONG fat_cache_block;
     UWORD fat_cache_no;    /* FAT number that cached FAT blocks belong to */
 
+    /* Clean shutdown bit tracking, see validate.c */
+    BOOL volume_dirty;      /* clean shutdown bit is currently cleared */
+    BOOL suppress_dirty;    /* don't touch the bit for the writes in progress */
+    BOOL needs_validation;  /* a validation attempt did not complete */
+
     APTR fsinfo_block;
     struct FATFSInfo *fsinfo_buffer;
 
@@ -263,10 +268,12 @@ struct Globals
     struct timerequest *timereq;
     struct MsgPort *timerport;
     ULONG last_num;    /* last block number that was outside boundaries */
+    ULONG max_transfer_bytes;   /* device's DE_MAXTRANSFER, 0xFFFFFFFF if none given */
     UWORD readcmd;
     UWORD writecmd;
     BOOL timer_active;
     BOOL restart_timer;
+    UWORD timer_deferred;       /* flushes postponed by continuing activity */
 
     /* volumes */
     struct FSSuper *sb;    /* current sb */

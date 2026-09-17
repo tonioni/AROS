@@ -21,7 +21,8 @@
 
 #define DEVNAME         "usb2otg.device"
 
-#define USB2OTG_DT_COMPATIBLE "brcm,bcm2708-usb"
+#define USB2OTG_DT_COMPATIBLE "brcm,bcm2835-usb"
+#define USB2OTG_DT_COMPATIBLE_LEGACY "brcm,bcm2708-usb"
 
 const char devname[]    = MOD_NAME_STRING;
 
@@ -61,6 +62,8 @@ static BOOL FNAME_DEV(DTEnabled)(void)
        such node means this machine has no OTG core of ours - BCM2712 puts a
        different controller somewhere else entirely. */
     key = OF_FindNodeByCompatible(NULL, USB2OTG_DT_COMPATIBLE);
+    if (key == NULL)
+        key = OF_FindNodeByCompatible(NULL, USB2OTG_DT_COMPATIBLE_LEGACY);
     if (key == NULL)
         return FALSE;
 
@@ -277,6 +280,12 @@ static int FNAME_DEV(Init)(LIBBASETYPEPTR USB2OTGBase)
                                     USB2OTGBase->hd_Unit->hu_WorkerTask = NewCreateTask(
                                         TASKTAG_NAME, "USB2OTG Worker",
                                         TASKTAG_AFFINITY, &USB2OTGBase->hd_Unit->hu_WorkerAffinity,
+                                        /* Stands in for the software
+                                         * interrupt the non-SMP build uses,
+                                         * so it must outrank application
+                                         * tasks: at priority 0 completions
+                                         * waited for quantum rotation. */
+                                        TASKTAG_PRI, 50,
                                         TASKTAG_PC, FNAME_DEV(WorkerTask),
                                         TASKTAG_TASKMSGPORT, &USB2OTGBase->hd_Unit->hu_WorkerPort,
                                         TASKTAG_ARG1, USB2OTGBase->hd_Unit,
@@ -371,6 +380,12 @@ static int FNAME_DEV(Init)(LIBBASETYPEPTR USB2OTGBase)
                                     otg_RegVal = rd32le(USB2OTG_AHB);
                                     otg_RegVal |= USB2OTG_AHB_INTENABLE;
                                     wr32le(USB2OTG_AHB, otg_RegVal);
+
+                                    /* Release the worker only now: it
+                                     * preempts us on the first port
+                                     * interrupt, and what it reads is only
+                                     * filled in by the init above. */
+                                    Signal(USB2OTGBase->hd_Unit->hu_WorkerTask, SIGF_SINGLE);
 
                                     bug("[USB2OTG] HS OTG USB Driver Initialised\n");
                                 }

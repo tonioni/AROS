@@ -2,6 +2,10 @@
     Copyright (C) 2010-2026, The AROS Development Team. All rights reserved.
 */
 
+#include <aros/asmcall.h>
+#include <exec/interrupts.h>
+#include <exec/pm.h>
+#include <proto/exec.h>
 #include "nouveau_intern.h"
 #include "compositor.h"
 
@@ -13,6 +17,7 @@
 #include <aros/debug.h>
 #include <proto/oop.h>
 
+#include <libdrm/arosdrm.h>
 #include <libdrm/arosdrmmode.h>
 #include <uapi/drm/nouveau_drm.h>
 #include <drm-compat/drm_compat_pci.h>
@@ -58,7 +63,7 @@ static BOOL HIDDNouveauSelectConnectorCrtc(LONG fd, drmModeConnectorPtr * select
     drmmode = drmModeGetResources(fd);
     if (!drmmode)
     {
-        D(bug("[Nouveau] Not able to get resources information\n"));
+        nvlog("[Nouveau] Not able to get resources information\n");
         UNLOCK_ENGINE
         return FALSE;
     }
@@ -70,6 +75,8 @@ static BOOL HIDDNouveauSelectConnectorCrtc(LONG fd, drmModeConnectorPtr * select
 
         if (connector)
         {
+            nvlog("[Nouveau] connector %u type %u status %u modes %d\n", connector->connector_id,
+                connector->connector_type, connector->connection, connector->count_modes);
             if (connector->connection == DRM_MODE_CONNECTED)
             {
                 /* Found connected connector */
@@ -79,11 +86,13 @@ static BOOL HIDDNouveauSelectConnectorCrtc(LONG fd, drmModeConnectorPtr * select
             
             drmModeFreeConnector(connector);
         }
+        else
+            nvlog("[Nouveau] connector %u: no information\n", drmmode->connectors[i]);
     }
     
     if (!(*selectedconnector))
     {
-        D(bug("[Nouveau] No connected connector\n"));
+        nvlog("[Nouveau] no connected connector (%d connectors, %d crtcs)\n", drmmode->count_connectors, drmmode->count_crtcs);
         drmModeFreeResources(drmmode);
         UNLOCK_ENGINE
         return FALSE;
@@ -98,7 +107,7 @@ static BOOL HIDDNouveauSelectConnectorCrtc(LONG fd, drmModeConnectorPtr * select
     *selectedcrtc = drmModeGetCrtc(fd, crtc_id);
     if (!(*selectedcrtc))
     {
-        D(bug("[Nouveau] Not able to get crtc information for crtc_id %d\n", crtc_id));
+        nvlog("[Nouveau] Not able to get crtc information for crtc_id %d\n", crtc_id);
         drmModeFreeConnector(*selectedconnector);
         *selectedconnector = NULL;
         drmModeFreeResources(drmmode);
@@ -141,8 +150,9 @@ static struct TagItem * HIDDNouveauCreateSyncTagsFromConnector(OOP_Class * cl, d
     if (modescount == 0)
         return NULL;
         
-    /* Allocate enough structures */
-    syncs = HIDDNouveauAlloc(sizeof(struct TagItem) * modescount);
+    /* One entry per mode plus the terminator: the list is consumed
+       via TAG_MORE, so it must end in TAG_DONE. */
+    syncs = HIDDNouveauAlloc(sizeof(struct TagItem) * (modescount + 1));
     
     /*
      * The list arrives ordered the way a display driver likes it -
@@ -223,7 +233,10 @@ static struct TagItem * HIDDNouveauCreateSyncTagsFromConnector(OOP_Class * cl, d
         syncs[i].ti_Tag = aHidd_DMEnum_SyncTags;
         syncs[i].ti_Data = (IPTR)sync;
     }
-    
+
+    syncs[modescount].ti_Tag = TAG_DONE;
+    syncs[modescount].ti_Data = 0;
+
     return syncs;
 }
 
@@ -249,6 +262,8 @@ static struct TagItem * HIDDNouveauCreateSyncTagsFromConnector(OOP_Class * cl, d
  * drivers writing to the same hardware - which is the failure this
  * whole mechanism exists to prevent.
  */
+bool nouveau_aros_boot_display;
+
 static BOOL HIDDNouveauReleaseBootDisplays(struct pci_dev *pdev,
     struct DisplayHandover *handover)
 {
@@ -276,15 +291,15 @@ static BOOL HIDDNouveauReleaseBootDisplays(struct pci_dev *pdev,
         cpu = pci_resource_cpu_addr(start);
         if ((cpu == NULL) || (cpu == (APTR)-1))
         {
-            D(bug("[Nouveau] BAR%lu (0x%p) has no CPU address, cannot match it\n",
-                  (unsigned long)bar, (APTR)(IPTR)start));
+            bug("[Nouveau] BAR%lu (0x%p) has no CPU address, cannot match it\n",
+                  (unsigned long)bar, (APTR)(IPTR)start);
             continue;
         }
 
         ranges[count].dr_Base = cpu;
         ranges[count].dr_Size = len;
-        D(bug("[Nouveau] BAR%lu occupies 0x%p, %lu bytes\n",
-              (unsigned long)bar, cpu, len));
+        bug("[Nouveau] BAR%lu occupies 0x%p, %lu bytes\n",
+              (unsigned long)bar, cpu, len);
         count++;
     }
 
@@ -299,20 +314,102 @@ static BOOL HIDDNouveauReleaseBootDisplays(struct pci_dev *pdev,
     while ((handle = handover->dho_FindDisplay(handover->dho_Context,
                                                count ? ranges : NULL)))
     {
+        nouveau_aros_boot_display = TRUE;
         if (!handover->dho_ExpungeDisplay(handover->dho_Context, handle))
         {
-            bug("[Nouveau] boot display 0x%p shares this card and is still in"
+            nvlog("[Nouveau] boot display 0x%p shares this card and is still in"
                 " use - not taking the card over\n", handle);
             return FALSE;
         }
 
-        D(bug("[Nouveau] boot display 0x%p released this card\n", handle));
+        bug("[Nouveau] boot display 0x%p released this card\n", handle);
     }
 
+    bug("[Nouveau] handover: done (evicted %s)\n",
+        nouveau_aros_boot_display ? "boot display(s)" : "nothing");
     return TRUE;
 }
 
+/*
+ * Just before the platform reset performer runs (EFI reset sits at
+ * priority -56), shut the driver down the way every other port of this
+ * stack does on module unload: stop display work, then tell GSP-RM the
+ * driver is going away and let it halt, tearing its protected region
+ * down so the next boot's GSP-FMC starts cleanly. A power-off skips all
+ * of it: the card needs no unload across a power cycle, and a machine
+ * without a power-off mechanism still needs the driver alive to render
+ * intuition's final screen.
+ */
+volatile int nouveau_shutting_down;
+
+static struct CardData *nouveau_shutdown_carddata;
+
+static AROS_INTH1(HIDDNouveauShutdownHandler, struct Interrupt *, handler)
+{
+    AROS_INTFUNC_INIT
+
+    UBYTE action = handler->is_Node.ln_Type & SD_ACTION_MASK;
+
+    /* Bitwise: covers cold, warm and the combined SD_ACTION_REBOOT */
+    if (action & SD_ACTION_REBOOT)
+    {
+        nouveau_shutting_down = 1;
+        if (nouveau_shutdown_carddata)
+        {
+            bug("[nouveau] shutting down: draining and freeing channels\n");
+            HIDDNouveauAccelShutdown(nouveau_shutdown_carddata);
+        }
+        nouveau_shutdown();
+    }
+
+    return FALSE;
+
+    AROS_INTFUNC_EXIT
+}
+
+static struct Interrupt nouveau_shutdown_interrupt;
+
+static void HIDDNouveauInstallShutdownHandler(struct CardData *carddata)
+{
+    nouveau_shutdown_carddata = carddata;
+    if (nouveau_shutdown_interrupt.is_Code)
+        return;
+
+    nouveau_shutdown_interrupt.is_Node.ln_Type = NT_INTERRUPT;
+    nouveau_shutdown_interrupt.is_Node.ln_Pri  = -48;
+    nouveau_shutdown_interrupt.is_Node.ln_Name = "nouveau.hidd";
+    nouveau_shutdown_interrupt.is_Code         = (VOID_FUNC)HIDDNouveauShutdownHandler;
+    nouveau_shutdown_interrupt.is_Data         = &nouveau_shutdown_interrupt;
+    AddResetCallback(&nouveau_shutdown_interrupt);
+}
+
 /* PUBLIC METHODS */
+/* DRM connector type -> vHidd_ConnectorType_* (0 = unknown) */
+static ULONG HIDDNouveauConnectorType(uint32_t drmtype)
+{
+    switch (drmtype)
+    {
+    case DRM_MODE_CONNECTOR_VGA:         return vHidd_ConnectorType_VGA;
+    case DRM_MODE_CONNECTOR_DVII:
+    case DRM_MODE_CONNECTOR_DVID:
+    case DRM_MODE_CONNECTOR_DVIA:        return vHidd_ConnectorType_DVI;
+    case DRM_MODE_CONNECTOR_HDMIA:
+    case DRM_MODE_CONNECTOR_HDMIB:       return vHidd_ConnectorType_HDMI;
+    case DRM_MODE_CONNECTOR_DisplayPort: return vHidd_ConnectorType_DisplayPort;
+    case DRM_MODE_CONNECTOR_eDP:         return vHidd_ConnectorType_eDP;
+    case DRM_MODE_CONNECTOR_LVDS:        return vHidd_ConnectorType_LVDS;
+    case DRM_MODE_CONNECTOR_Composite:
+    case DRM_MODE_CONNECTOR_SVIDEO:
+    case DRM_MODE_CONNECTOR_Component:
+    case DRM_MODE_CONNECTOR_9PinDIN:
+    case DRM_MODE_CONNECTOR_TV:          return vHidd_ConnectorType_TV;
+    case DRM_MODE_CONNECTOR_DSI:         return vHidd_ConnectorType_DSI;
+    case DRM_MODE_CONNECTOR_VIRTUAL:     return vHidd_ConnectorType_Virtual;
+    case DRM_MODE_CONNECTOR_USB:         return vHidd_ConnectorType_USBC;
+    default:                             return vHidd_ConnectorType_Unknown;
+    }
+}
+
 OOP_Object * METHOD(Nouveau, Root, New)
 {
     drmModeCrtcPtr selectedcrtc = NULL;
@@ -323,7 +420,6 @@ OOP_Object * METHOD(Nouveau, Root, New)
     struct CardData * carddata = &(SD(cl)->carddata);
     struct DisplayHandover *handover;
     struct pci_dev *pdev;
-    LONG ret;
     ULONG selectedcrtcid;
 
     pdev = nouveau_init_findcard();
@@ -348,17 +444,33 @@ OOP_Object * METHOD(Nouveau, Root, New)
     if (nouveau_init_probe(pdev) < 0)
         return NULL;
 
+    HIDDNouveauInstallShutdownHandler(&(SD(cl)->carddata));
+
     LOCK_ENGINE
 
-    nouveau_device_open("", &nvdev);
+    {
+        struct nouveau_drm *nvdrm = NULL;
+        int drmfd = drmOpen("nouveau", "");
+
+        if (drmfd < 0 || nouveau_drm_new(drmfd, &nvdrm) || nouveau_device_new(&nvdrm->client, &nvdev))
+        {
+            nvlog("[Nouveau] Not able to open the drm device\n");
+            if (nvdrm)
+                nouveau_drm_del(&nvdrm);
+            if (drmfd >= 0)
+                drmClose(drmfd);
+            UNLOCK_ENGINE
+            return NULL;
+        }
+    }
 
     nouveau_client_new(nvdev, &nvclient);
 
 
     /* Select crtc and connector */
-    if (!HIDDNouveauSelectConnectorCrtc(nvdev->fd, &selectedconnector, &selectedcrtc))
+    if (!HIDDNouveauSelectConnectorCrtc(NOUVEAU_DEV_FD(nvdev), &selectedconnector, &selectedcrtc))
     {
-        D(bug("[Nouveau] Not able to select connector and crtc\n"));
+        nvlog("[Nouveau] Not able to select connector and crtc\n");
 
         UNLOCK_ENGINE
 
@@ -372,7 +484,7 @@ OOP_Object * METHOD(Nouveau, Root, New)
     syncs = HIDDNouveauCreateSyncTagsFromConnector(cl, selectedconnector);
     if (syncs == NULL)
     {
-        D(bug("[Nouveau] Not able to read any sync modes\n"));
+        nvlog("[Nouveau] Not able to read any sync modes\n");
         UNLOCK_ENGINE
         return NULL;
     }
@@ -423,9 +535,53 @@ OOP_Object * METHOD(Nouveau, Root, New)
 	    { TAG_DONE, 0UL }
         };
 
+        /* Name the adapter after the chip that was actually found */
+        {
+            char chip[24];
+            const char *family;
+
+            switch (nvdev->chipset & 0xff0)
+            {
+            case 0x050: case 0x080: case 0x090: case 0x0a0:
+                family = "Tesla"; break;
+            case 0x0c0: case 0x0d0:
+                family = "Fermi"; break;
+            case 0x0e0: case 0x0f0: case 0x100:
+                family = "Kepler"; break;
+            case 0x110: case 0x120:
+                family = "Maxwell"; break;
+            case 0x130:
+                family = "Pascal"; break;
+            case 0x140:
+                family = "Volta"; break;
+            case 0x160:
+                family = "Turing"; break;
+            case 0x170:
+                family = "Ampere"; break;
+            case 0x180:
+                family = "Hopper"; break;
+            case 0x190:
+                family = "Ada"; break;
+            case 0x1a0: case 0x1b0:
+                family = "Blackwell"; break;
+            default:
+                family = NULL; break;
+            }
+
+            if (!drmGetChipName(NOUVEAU_DEV_FD(nvdev), chip, sizeof(chip)))
+                sprintf(chip, "NV%X", (unsigned)nvdev->chipset);
+
+            if (family)
+                snprintf(SD(cl)->hardwarename, sizeof(SD(cl)->hardwarename),
+                         "NVIDIA %s (%s) Gfx Adaptor", chip, family);
+            else
+                snprintf(SD(cl)->hardwarename, sizeof(SD(cl)->hardwarename),
+                         "NVIDIA %s Gfx Adaptor", chip);
+        }
+
         struct TagItem mytags[] = {
             { aHidd_Name            , (IPTR)"Nouveau"     },
-            { aHidd_HardwareName    , (IPTR)"Nvidia Gfx Adaptor"   },
+            { aHidd_HardwareName    , (IPTR)SD(cl)->hardwarename },
             { aHidd_ProducerName    , (IPTR)"Nvidia Corporation"  },
 	    { TAG_MORE, (IPTR)msg->attrList }
         };
@@ -458,9 +614,12 @@ OOP_Object * METHOD(Nouveau, Root, New)
             {
                 struct TagItem displaytags[] =
                 {
-                    { aHidd_Display_GfxHidd,  (IPTR)o        },
-                    { aHidd_Display_ModeTags, (IPTR)modetags },
-                    { TAG_DONE,               0              }
+                    { aHidd_Display_GfxHidd,       (IPTR)o        },
+                    { aHidd_Display_ModeTags,      (IPTR)modetags },
+                    { aHidd_Display_ConnectorType,
+                      HIDDNouveauConnectorType(selectedconnector->connector_type) },
+                    { aHidd_Display_ConnectorID,   selectedconnector->connector_type_id },
+                    { TAG_DONE,                    0              }
                 };
                 SD(cl)->display = OOP_NewObject(SD(cl)->displayclass, NULL, displaytags);
                 if (SD(cl)->display)
@@ -508,6 +667,25 @@ OOP_Object * METHOD(Nouveau, Root, New)
             case 0x130:
                 carddata->Architecture = NV_PASCAL;
                 break;
+            case 0x140:
+                carddata->Architecture = NV_VOLTA;
+                break;
+            case 0x160:
+                carddata->Architecture = NV_TURING;
+                break;
+            case 0x170:
+                carddata->Architecture = NV_AMPERE;
+                break;
+            case 0x180:
+                carddata->Architecture = NV_HOPPER;
+                break;
+            case 0x190:
+                carddata->Architecture = NV_ADA;
+                break;
+            case 0x1a0:
+            case 0x1b0:
+                carddata->Architecture = NV_BLACKWELL;
+                break;
             default:
                 bug("Unrecognized chipset: 0x%x, exiting.\n", carddata->dev->chipset);
                 UNLOCK_ENGINE
@@ -526,11 +704,8 @@ OOP_Object * METHOD(Nouveau, Root, New)
 
             /* Initialize acceleration objects */
         
-            ret = HIDDNouveauAccelCommonInit(carddata);
-            if (ret < 0)
-            {
-                /* TODO: Check ret, how to handle ? */
-            }
+            if (!HIDDNouveauAccelCommonInit(carddata))
+                nvlog("[Nouveau] acceleration setup failed, running unaccelerated\n");
 
             /* Allocate GART scratch buffer */
             if (carddata->dev->gart_size > GART_BUFFER_SIZE)
@@ -541,11 +716,17 @@ OOP_Object * METHOD(Nouveau, Root, New)
 
             /* This can fail */
             nouveau_bo_new(carddata->dev, NOUVEAU_BO_GART | NOUVEAU_BO_MAP, 0, gartsize, NULL, &carddata->GART);
+            /* The driver's cache maintenance walks the whole buffer on
+               every access (12MiB a time); the rows a transfer exchanges
+               are maintained where they are exchanged instead
+               (nouveau_staging_to_gpu / _from_gpu). */
+            if (carddata->GART)
+                drmNouveauBoSelfSync(NOUVEAU_DEV_FD(carddata->dev), carddata->GART->handle);
 
             InitSemaphore(&carddata->gartsemaphore);
             
             /* Set initial pattern (else 16-bit ROPs are not working) */
-            switch(carddata->Architecture)
+            if (carddata->channel) switch(carddata->Architecture)
             {
             case(NV_ARCH_03):
             case(NV_ARCH_04):
@@ -562,6 +743,12 @@ OOP_Object * METHOD(Nouveau, Root, New)
             case(NV_KEPLER):
             case(NV_MAXWELL):
             case(NV_PASCAL):
+            case(NV_VOLTA):
+            case(NV_TURING):
+            case(NV_AMPERE):
+            case(NV_HOPPER):
+            case(NV_ADA):
+            case(NV_BLACKWELL):
                 HIDDNouveauNVC0SetPattern(carddata, ~0, ~0, ~0, ~0);
                 break;
             }
@@ -636,13 +823,18 @@ VOID METHOD(Nouveau, Hidd_Gfx, CopyBox)
         case(NV_KEPLER):
         case(NV_MAXWELL):
         case(NV_PASCAL):
+        case(NV_VOLTA):
+        case(NV_TURING):
+        case(NV_AMPERE):
+        case(NV_HOPPER):
+        case(NV_ADA):
+        case(NV_BLACKWELL):
             ret = HIDDNouveauNVC0CopySameFormat(carddata, srcdata, destdata, 
                         msg->srcX, msg->srcY, msg->destX, msg->destY, 
                         msg->width, msg->height, GC_DRMD(msg->gc));
             break;
         }
 
-nouveau_bo_wait(destdata->bo, NOUVEAU_BO_RD, carddata->client);
 
         UNLOCK_BITMAP_BM(destdata);
         UNLOCK_BITMAP_BM(srcdata);

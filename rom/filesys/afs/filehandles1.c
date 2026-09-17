@@ -287,7 +287,7 @@ void remHandle(struct AFSBase *afsbase, struct AfsHandle *ah) {
 struct AfsHandle *old = NULL;
 
         D(bug("[afs 0x%p] Removing handle 0x%p\n", ah->volume, ah));
-        if (ah->volume->volumenode == ah->volumenode) {
+        if (ah->volumenode == NULL || ah->volume->volumenode == ah->volumenode) {
             D(bug("[afs 0x%p] Lock's volume is online\n", ah->volume));
             if (ah->volume->locklist==ah)
                 ah->volume->locklist=ah->next;
@@ -485,6 +485,7 @@ struct BlockCache *fileblock, *dirblock;
 UBYTE filename[34];
 ULONG block;
 ULONG fileblocknum = -1;
+ULONG dirblocknum = 0;
 
         /*
          * nicely say what's going on
@@ -540,7 +541,25 @@ ULONG fileblocknum = -1;
                                  * remove existing file if we are asked to clear its contents
                                  */
                                 if (mode == MODE_NEWFILE)
+                                {
+                                        /*
+                                         * deleteObject() walks the directory again and frees every
+                                         * block of the old file through the bitmap; each of those
+                                         * getBlock() calls may recycle the cache entry dirblock points
+                                         * at. Re-fetch the directory by block number afterwards - using
+                                         * the stale pointer made createNewEntry() treat whatever block
+                                         * now occupied the entry (typically the deleted file's own
+                                         * header) as the directory and link the new file into it.
+                                         */
+                                        dirblocknum = dirblock->blocknum;
                                         *error = deleteObject(afsbase, dirah, name);
+                                        if ((*error == 0) || (*error == ERROR_OBJECT_NOT_FOUND))
+                                        {
+                                                dirblock = getBlock(afsbase, dirah->volume, dirblocknum);
+                                                if (dirblock == NULL)
+                                                        *error = ERROR_UNKNOWN;
+                                        }
+                                }
 
                                 /*
                                  * if we cleared the file or there was no file at all, move on
@@ -606,6 +625,37 @@ void closef(struct AFSBase *afsbase, struct AfsHandle *ah) {
          length  - size of data to read
  Output: read bytes
 *******************************************/
+/*
+ * Read consecutive whole data blocks, starting at the current one, in one
+ * request. Returns the number of blocks read, 0 if none qualified, -1 on error.
+ */
+static ULONG bulkRead
+        (
+                struct AFSBase *afsbase,
+                struct AfsHandle *ah,
+                struct BlockCache *extensionbuffer,
+                char *dest,
+                ULONG maxblocks
+        )
+{
+struct Volume *volume = ah->volume;
+ULONG key = ah->current.filekey;
+ULONG start = OS_BE2LONG(extensionbuffer->buffer[key]);
+ULONG count = 1;
+        if (maxblocks > volume->bulkblocks)
+                maxblocks = volume->bulkblocks;
+        while (count < maxblocks && key >= BLK_TABLE_START + count
+                && OS_BE2LONG(extensionbuffer->buffer[key - count]) == start + count)
+                count++;
+        count = cleanRun(volume, start, count);
+        if (count == 0)
+                return 0;
+        if (readDisk(afsbase, volume, start, count, volume->bulkbuffer) != 0)
+                return (ULONG)-1;
+        CopyMem(volume->bulkbuffer, dest, count * BLOCK_SIZE(volume));
+        return count;
+}
+
 LONG readData
         (
                 struct AFSBase *afsbase,
@@ -677,6 +727,26 @@ D(
                                 "[afs]   readData: reading datablock %d\n",
                                 OS_BE2LONG(extensionbuffer->buffer[ah->current.filekey]))
                         );
+                if (ah->volume->dosflags != 0 && ah->current.byte == 0
+                        && length >= BLOCK_SIZE(ah->volume) && ah->volume->bulkblocks != 0)
+                {
+                        ULONG count = bulkRead(afsbase, ah, extensionbuffer,
+                                (char *)buffer + readbytes, length / BLOCK_SIZE(ah->volume));
+                        if (count == (ULONG)-1)
+                        {
+                                extensionbuffer->flags &= ~BCF_USED;
+                                *error = ERROR_UNKNOWN;
+                                return ENDSTREAMCH;
+                        }
+                        if (count != 0)
+                        {
+                                ah->current.filekey -= count;
+                                count *= BLOCK_SIZE(ah->volume);
+                                length -= count;
+                                readbytes += count;
+                                continue;
+                        }
+                }
                 databuffer = getBlock
                         (
                                 afsbase,

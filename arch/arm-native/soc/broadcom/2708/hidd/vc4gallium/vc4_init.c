@@ -36,7 +36,7 @@ APTR DMABase = NULL;
 #include "vc4_drm_aros.h"
 #include "vc4_v3d.h"
 
-/* IID for vc4gfx bitmap — matches vc4gfx_bitmap.h */
+/* IID for vcgfx bitmap — matches vcgfx_bitmap.h */
 #define IID_Hidd_BitMap_VideoCore4  "hidd.bitmap.bcmvc4"
 
 /*
@@ -210,6 +210,15 @@ static int HiddVC4Gallium_InitLib(LIBBASETYPEPTR LIBBASE)
         __arm_periiobase = KrnGetSystemAttr(KATTR_PeripheralBase);
     D(bug("[VC4Gallium] Peripheral base: 0x%08lx\n", __arm_periiobase));
 
+    /* BCM2711 has V3D 4.2 (driven by hidd/v3d), and its hub sits exactly
+     * where V3D 2.x keeps IDENT - probing would recognise the wrong GPU.
+     * Callers fall back to softpipe. */
+    if (__arm_periiobase == BCM2711_PERIIOBASE)
+    {
+        D(bug("[VC4Gallium] BCM2711 has V3D 4.2, not ours - not loading\n"));
+        return FALSE;
+    }
+
     LIBBASE->sd.MBoxBase = OpenResource("mbox.resource");
     if (!LIBBASE->sd.MBoxBase)
     {
@@ -288,11 +297,11 @@ static int HiddVC4Gallium_InitLib(LIBBASETYPEPTR LIBBASE)
     LIBBASE->sd.dmaCBRaw = NULL;
     LIBBASE->sd.dmaCBRawSize = 0;
 
-    /* vc4gfx bitmap attr base is optional — without it we fall back to
+    /* vcgfx bitmap attr base is optional — without it we fall back to
      * WritePixelArray for display. Not fatal. */
     LIBBASE->sd.hiddVC4GfxBMAB = OOP_ObtainAttrBase((STRPTR)IID_Hidd_BitMap_VideoCore4);
     if (!LIBBASE->sd.hiddVC4GfxBMAB)
-        D(bug("[VC4Gallium] vc4gfx bitmap attr base not available — will use CPU blit\n"));
+        D(bug("[VC4Gallium] vcgfx bitmap attr base not available — will use CPU blit\n"));
 
     /* Standard BitMap attribute base for BytesPerRow etc. */
     LIBBASE->sd.hiddBitMapAB = OOP_ObtainAttrBase((STRPTR)IID_Hidd_BitMap);

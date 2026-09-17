@@ -293,7 +293,15 @@ static LONG MakeConWindow(struct filehandle *fh)
         else
             err = ERROR_INVALID_RESIDENT_LIBRARY;
         if (err)
+        {
+            /* The pointer must not survive the close: MakeSureWinIsOpen
+             * treats a non-NULL window as an open one, so a stale pointer
+             * both bypasses the FHFLG_NOWINDOW latch and hands console
+             * I/O a freed window.
+             */
             CloseWindow(fh->window);
+            fh->window = NULL;
+        }
 
     } /* if (fh->window) */
     else {
@@ -351,7 +359,22 @@ static BOOL MakeSureWinIsOpen(struct filehandle *fh)
         return TRUE;
     if (fh->window)
         return TRUE;
-    return MakeConWindow(fh) == 0;
+    if (fh->flags & FHFLG_NOWINDOW)
+        return FALSE;
+    if (MakeConWindow(fh) == 0)
+        return TRUE;
+    if (fh->flags & FHFLG_BOOTCON) {
+        /* The boot console could not get its window - typically the
+         * screen's bitmap allocation failing on a chip-RAM-only machine
+         * whose memory the booted program already owns. Latch it:
+         * without this every packet re-attempts the whole screen open
+         * (40 KB of chip for a Workbench screen) forever. The callers
+         * turn a latched boot console into a sink: writes are
+         * swallowed, reads see end-of-file.
+         */
+        fh->flags |= FHFLG_NOWINDOW;
+    }
+    return FALSE;
 }
 
 static void close_con(struct filehandle *fh)
@@ -758,19 +781,23 @@ LONG CONMain(struct ExecBase *SysBase)
                                         if (insertedlen <= (INPUTBUFFER_SIZE - 1))
                                             iconpath[insertedlen++] = ' ';
 
-                                        currentpos = fh->inputpos;
-                                        currentrest = fh->inputsize - fh->inputpos;
-                                        memmove(&fh->inputbuffer[currentpos + insertedlen],
-                                                &fh->inputbuffer[currentpos],
-                                                currentrest);
-                                        CopyMem(iconpath, &fh->inputbuffer[currentpos],
-                                                insertedlen);
-                                        fh->inputsize += insertedlen;
-                                        fh->inputpos += insertedlen;
+                                        if (fh->inputsize <= INPUTBUFFER_SIZE &&
+                                            insertedlen <= (ULONG)(INPUTBUFFER_SIZE - fh->inputsize))
+                                        {
+                                            currentpos = fh->inputpos;
+                                            currentrest = fh->inputsize - fh->inputpos;
+                                            memmove(&fh->inputbuffer[currentpos + insertedlen],
+                                                    &fh->inputbuffer[currentpos],
+                                                    currentrest);
+                                            CopyMem(iconpath, &fh->inputbuffer[currentpos],
+                                                    insertedlen);
+                                            fh->inputsize += insertedlen;
+                                            fh->inputpos += insertedlen;
 
-                                        do_write(fh, &fh->inputbuffer[currentpos],
-                                                 insertedlen + currentrest);
-                                        do_movecursor(fh, CUR_LEFT, currentrest);
+                                            do_write(fh, &fh->inputbuffer[currentpos],
+                                                     insertedlen + currentrest);
+                                            do_movecursor(fh, CUR_LEFT, currentrest);
+                                        }
                                     }
                                 }
                             } while (++i < fh->appmsg->am_NumArgs);
@@ -1022,7 +1049,10 @@ LONG CONMain(struct ExecBase *SysBase)
                 case ACTION_READ:
                     DACTION(bug("[con:handler] ACTION_READ\n"));
                     if (!MakeSureWinIsOpen(fh)) {
-                        replypkt2(dp, DOSFALSE, ERROR_NO_FREE_STORE);
+                        if (fh->flags & FHFLG_NOWINDOW)
+                            replypkt(dp, 0); /* sink: end-of-file */
+                        else
+                            replypkt2(dp, DOSFALSE, ERROR_NO_FREE_STORE);
                         break;
                     }
                     fh->breaktask = dp->dp_Port->mp_SigTask;
@@ -1039,7 +1069,10 @@ LONG CONMain(struct ExecBase *SysBase)
                 case ACTION_WRITE:
                     DACTION(bug("[con:handler] ACTION_WRITE\n"));
                     if (!MakeSureWinIsOpen(fh)) {
-                        replypkt2(dp, DOSFALSE, ERROR_NO_FREE_STORE);
+                        if (fh->flags & FHFLG_NOWINDOW)
+                            replypkt(dp, dp->dp_Arg3); /* sink: swallowed */
+                        else
+                            replypkt2(dp, DOSFALSE, ERROR_NO_FREE_STORE);
                         break;
                     }
                     fh->breaktask = dp->dp_Port->mp_SigTask;
@@ -1078,7 +1111,10 @@ LONG CONMain(struct ExecBase *SysBase)
                     {
                         DACTION(bug("[con:handler] ACTION_WAIT_CHAR\n"));
                         if (!MakeSureWinIsOpen(fh)) {
-                            replypkt2(dp, DOSFALSE, ERROR_NO_FREE_STORE);
+                            if (fh->flags & FHFLG_NOWINDOW)
+                                replypkt(dp, DOSFALSE); /* sink: never a char */
+                            else
+                                replypkt2(dp, DOSFALSE, ERROR_NO_FREE_STORE);
                             break;
                         }
                         if (fh->inputsize > 0) {
@@ -1121,10 +1157,16 @@ LONG CONMain(struct ExecBase *SysBase)
                         id->id_VolumeNode = (fh->flags & FHFLG_DEVICEMODE)
                                                 ? (BPTR)(SIPTR)-1
                                                 : (BPTR)fh->window;
-                        /* Anyone still holding a stream on us. Reporting the
-                           IORequest here made us look busy for as long as we
-                           were alive, so DISMOUNT could never proceed. */
-                        id->id_InUse = fh->usecount;
+                        if (fh->flags & FHFLG_DEVICEMODE) {
+                            /* Device-backed consoles are shared and can be
+                               dismounted, so report their open count. */
+                            id->id_InUse = fh->usecount;
+                        } else {
+                            /* Classic console handlers return their read
+                               IORequest here. Old programs such as the 1.3
+                               SetMap command use it to find the console unit. */
+                            id->id_InUse = (IPTR)fh->conreadio;
+                        }
                         replypkt(dp, DOSTRUE);
                     }
                     break;

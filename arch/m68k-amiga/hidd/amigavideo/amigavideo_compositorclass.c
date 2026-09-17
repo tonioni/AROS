@@ -89,6 +89,13 @@ OOP_Object *METHOD(AmigaVideoCompositor, Root, New)
             /* Our housekeeper must have the largest possible priority */
             compdata->housekeeper = NewCreateTask(TASKTAG_NAME       , "AmigaVideo display housekeeper",
                                 TASKTAG_PRI        , 127,
+                                /*
+                                 * A short message loop; measured peak
+                                 * stack use is under 1 KB, and the
+                                 * stack is chip RAM on an unexpanded
+                                 * machine.
+                                 */
+                                TASKTAG_STACKSIZE  , 4096,
                                 TASKTAG_PC         , DisplayServiceTask,
                                 TASKTAG_ARG1       , o,
                                 TAG_DONE);
@@ -437,7 +444,18 @@ VOID METHOD(AmigaVideoCompositor, Hidd_Compositor, BitMapStackChanged)
                 }
 
         if (csd->acb)
-             csd->acb(csd->acbdata, bm);
+        {
+            /* Report the display as active only when the screen it shows on
+               top is the frontmost screen overall. A native display that
+               shares its output with an RTG one (UAE, scan-doubled setups)
+               is (re)composed whenever any screen changes, and claiming the
+               pointer then would take it away from the RTG screen the user
+               just brought to the front */
+            struct ViewPort *topvp = msg->data ? msg->data->vpe->ViewPort : NULL;
+
+            if (topvp && GfxBase->ActiView && (GfxBase->ActiView->ViewPort == topvp))
+                csd->acb(csd->acbdata, bm);
+        }
     }
     else {
         D(bug("[AmigaVideo:Compositor] %s:  no visible screens .. blanking\n", __func__);)

@@ -4,6 +4,9 @@
 
 #include "nouveau_intern.h"
 
+unsigned long nouveau_compat_irq_count(void);
+unsigned long nouveau_compat_usecs(void);
+
 #define DEBUG 0
 #include <aros/debug.h>
 #include <proto/oop.h>
@@ -96,11 +99,15 @@ OOP_Object * METHOD(NouveauBitMap, Root, New)
     if (bmdata->compositor == NULL)
         goto exit_fail;
 
+    if (displayable)
+        nvlog("[Nouveau] displayable bitmap %p: %ldx%ld depth %ld pitch %ld bo %p\n", o,
+              (long)width, (long)height, (long)depth, (long)bmdata->pitch, bmdata->bo);
+
     return o;
 
 exit_fail:
 
-    bug("[Nouveau]: Failed to create bitmap %dx%d %d %d\n", width, height, depth, stdfmt);
+    nvlog("[Nouveau]: Failed to create bitmap %dx%d %d %d\n", width, height, depth, stdfmt);
 
     if (o)
     {
@@ -122,12 +129,28 @@ VOID NouveauBitMap__Root__Dispose(OOP_Class *cl, OOP_Object *o, OOP_Msg msg)
     if (bmdata->fbid != 0)
     {
         struct nouveau_device *nvdev = SD(cl)->carddata.dev;
-        drmModeRmFB(nvdev->fd, bmdata->fbid);   
+        drmModeRmFB(NOUVEAU_DEV_FD(nvdev), bmdata->fbid);   
         bmdata->fbid = 0;
     }
 
     if (bmdata->bo)
     {
+        /* Engine work is submitted lazily: an operation still queued
+           here has no fence yet, so the kernel would free the bo from
+           under it. Submitting attaches the fence, after which the
+           kernel keeps the bo and its mapping alive until the engine is
+           done (nouveau_gem_object_unmap defers on the fence, ttm delays
+           the delete). No need to wait here. */
+        if (bmdata->gpu_dirty)
+        {
+            struct CardData *carddata = &(SD(cl)->carddata);
+
+            if (carddata->pushbuf)
+                nouveau_pushbuf_kick(carddata->pushbuf);
+            if (carddata->ce_enabled && carddata->ce_pushbuf)
+                nouveau_pushbuf_kick(carddata->ce_pushbuf);
+            bmdata->gpu_dirty = FALSE;
+        }
         nouveau_bo_ref(NULL, &bmdata->bo); /* Release reference */
     }
     UNLOCK_ENGINE
@@ -231,17 +254,23 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutPixel)
     }
     else
         addr += map;
-    
+
+    if (bmdata->gpu_dirty)
+    {
+        nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RDWR, carddata->client);
+        bmdata->gpu_dirty = FALSE;
+    }
+
     switch(bmdata->bytesperpixel)
     {
     case(1):
         /* Not supported */
         break;
     case(2):
-        writew(msg->pixel, (APTR)addr);
+        hidd_writew(msg->pixel, (APTR)addr);
         break;
     case(4):
-        writel(msg->pixel, (APTR)addr);
+        hidd_writel(msg->pixel, (APTR)addr);
         break;
     }
 
@@ -269,17 +298,23 @@ HIDDT_Pixel METHOD(NouveauBitMap, Hidd_BitMap, GetPixel)
     }
     else
         addr += map;
-    
+
+    if (bmdata->gpu_dirty)
+    {
+        nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RDWR, carddata->client);
+        bmdata->gpu_dirty = FALSE;
+    }
+
     switch(bmdata->bytesperpixel)
     {
     case(1):
         /* Not supported */
         break;
     case(2):
-        pixel = readw((APTR)addr);
+        pixel = hidd_readw((APTR)addr);
         break;
     case(4):
-        pixel = readl((APTR)addr);
+        pixel = hidd_readl((APTR)addr);
         break;
     }
     
@@ -318,12 +353,17 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, Clear)
     case(NV_KEPLER):
     case(NV_MAXWELL):
     case(NV_PASCAL):
+    case(NV_VOLTA):
+    case(NV_TURING):
+    case(NV_AMPERE):
+    case(NV_HOPPER):
+    case(NV_ADA):
+    case(NV_BLACKWELL):
         ret = HIDDNouveauNVC0FillSolidRect(carddata, bmdata, 
                     0, 0, bmdata->drawable.width - 1, bmdata->drawable.height - 1, GC_DRMD(msg->gc), GC_BG(msg->gc));
         break;
     }    
 
-nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RD, carddata->client);
 
     UNLOCK_BITMAP
 
@@ -368,20 +408,24 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, FillRect)
     case(NV_KEPLER):
     case(NV_MAXWELL):
     case(NV_PASCAL):
+    case(NV_VOLTA):
+    case(NV_TURING):
+    case(NV_AMPERE):
+    case(NV_HOPPER):
+    case(NV_ADA):
+    case(NV_BLACKWELL):
         ret = HIDDNouveauNVC0FillSolidRect(carddata, bmdata, 
                     msg->minX, msg->minY, msg->maxX, msg->maxY, GC_DRMD(msg->gc), GC_FG(msg->gc));
         break;
     }
-
-nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RD, carddata->client);
 
     UNLOCK_BITMAP
 
     UNLOCK_ENGINE
 
     if (ret)
-        return;    
-    
+        return;
+
     /* Fallback to default method */
     OOP_DoSuperMethod(cl, o, (OOP_Msg)msg);
 }
@@ -409,7 +453,7 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutImage)
                     msg->x, msg->y, msg->width, msg->height, 
                     cl, o);
 
-nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RD, carddata->client);
+if (result) { bmdata->gpu_dirty = TRUE; HIDDNouveauFlushDisplayable(carddata, bmdata); }
 
         ReleaseSemaphore(&carddata->gartsemaphore);
 
@@ -439,6 +483,7 @@ nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RD, carddata->client);
         cl, o);
     }
 
+
     UNLOCK_BITMAP
 
     UNLOCK_ENGINE
@@ -459,6 +504,14 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, GetImage)
         BOOL result = FALSE;
         
         /* VRAM->GPU->GART GART->CPU->RAM */
+
+        /* The engine download is not ordered against work queued on the
+           other channel - settle any pending writes first */
+        if (bmdata->gpu_dirty)
+        {
+            nouveau_bo_wait(bmdata->bo, NOUVEAU_BO_RDWR, carddata->client);
+            bmdata->gpu_dirty = FALSE;
+        }
 
         ObtainSemaphore(&carddata->gartsemaphore);
         
@@ -499,6 +552,107 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, GetImage)
     UNLOCK_ENGINE
 }
 
+/* The per-pixel routines below, run against a staging copy of the
+   destination rectangle instead of the aperture (see
+   HIDDNouveauNVC0StagingRect): the rows arrive with the engine and go
+   back with it, and the CPU never reads VRAM. */
+struct nouveau_staging_ctx
+{
+    OOP_Class *cl;
+    OOP_Object *o;
+    struct pHidd_BitMap_PutAlphaImage *ai;
+    struct pHidd_BitMap_PutAlphaTemplate *at;
+    struct pHidd_BitMap_PutTemplate *t;
+    struct pHidd_BitMap_PutPattern *pat;
+    UBYTE cpp;
+};
+
+static VOID nouveau_staging_alphaimage(APTR rows, ULONG pitch, LONG line0, LONG lines, APTR ctx)
+{
+    struct nouveau_staging_ctx *c = ctx;
+    struct pHidd_BitMap_PutAlphaImage *msg = c->ai;
+    APTR src = (UBYTE *)msg->pixels + (IPTR)line0 * msg->modulo;
+
+    if (c->cpp == 4)
+        HIDDNouveauBitMapPutAlphaImage32(rows, pitch, src, msg->modulo, 0, 0, msg->width, lines);
+    else
+        HIDDNouveauBitMapPutAlphaImage16(rows, pitch, src, msg->modulo, 0, 0, msg->width, lines);
+}
+
+static VOID nouveau_staging_alphatemplate(APTR rows, ULONG pitch, LONG line0, LONG lines, APTR ctx)
+{
+    struct nouveau_staging_ctx *c = ctx;
+    struct pHidd_BitMap_PutAlphaTemplate *msg = c->at;
+    UBYTE *src = msg->alpha + (IPTR)line0 * msg->modulo;
+
+    if (c->cpp == 4)
+        HIDDNouveauBitMapPutAlphaTemplate32(rows, pitch, msg->gc, c->o, msg->invertalpha,
+            src, msg->modulo, 0, 0, msg->width, lines);
+    else
+        HIDDNouveauBitMapPutAlphaTemplate16(rows, pitch, msg->gc, c->o, msg->invertalpha,
+            src, msg->modulo, 0, 0, msg->width, lines);
+}
+
+static VOID nouveau_staging_template(APTR rows, ULONG pitch, LONG line0, LONG lines, APTR ctx)
+{
+    struct nouveau_staging_ctx *c = ctx;
+    struct pHidd_BitMap_PutTemplate *msg = c->t;
+    UBYTE *src = msg->masktemplate + (IPTR)line0 * msg->modulo;
+
+    if (c->cpp == 4)
+    {
+        struct pHidd_BitMap_PutMemTemplate32 __m =
+        {
+            SD(c->cl)->mid_PutMemTemplate32, msg->gc, src, msg->modulo,
+            msg->srcx, rows, pitch, 0, 0, msg->width, lines, msg->inverttemplate
+        }, *m = &__m;
+        OOP_DoMethod(c->o, (OOP_Msg)m);
+    }
+    else
+    {
+        struct pHidd_BitMap_PutMemTemplate16 __m =
+        {
+            SD(c->cl)->mid_PutMemTemplate16, msg->gc, src, msg->modulo,
+            msg->srcx, rows, pitch, 0, 0, msg->width, lines, msg->inverttemplate
+        }, *m = &__m;
+        OOP_DoMethod(c->o, (OOP_Msg)m);
+    }
+}
+
+static VOID nouveau_staging_pattern(APTR rows, ULONG pitch, LONG line0, LONG lines, APTR ctx)
+{
+    struct nouveau_staging_ctx *c = ctx;
+    struct pHidd_BitMap_PutPattern *msg = c->pat;
+    UBYTE *mask = msg->mask ? msg->mask + (IPTR)line0 * msg->maskmodulo : NULL;
+
+    if (c->cpp == 4)
+    {
+        struct pHidd_BitMap_PutMemPattern32 __m =
+        {
+            SD(c->cl)->mid_PutMemPattern32, msg->gc, msg->pattern, msg->patternsrcx,
+            msg->patternsrcy + line0, msg->patternheight, msg->patterndepth, msg->patternlut,
+            msg->invertpattern, mask, msg->maskmodulo, msg->masksrcx,
+            rows, pitch, 0, 0, msg->width, lines
+        }, *m = &__m;
+        OOP_DoMethod(c->o, (OOP_Msg)m);
+    }
+    else
+    {
+        struct pHidd_BitMap_PutMemPattern16 __m =
+        {
+            SD(c->cl)->mid_PutMemPattern16, msg->gc, msg->pattern, msg->patternsrcx,
+            msg->patternsrcy + line0, msg->patternheight, msg->patterndepth, msg->patternlut,
+            msg->invertpattern, mask, msg->maskmodulo, msg->masksrcx,
+            rows, pitch, 0, 0, msg->width, lines
+        }, *m = &__m;
+        OOP_DoMethod(c->o, (OOP_Msg)m);
+    }
+}
+
+/* No 2D engine and no cheap CPU path to VRAM on this generation */
+#define STAGING_BOUNCE_WANTED \
+    ((carddata->Architecture >= NV_BLACKWELL) && (bmdata->bytesperpixel > 1))
+
 VOID METHOD(NouveauBitMap, Hidd_BitMap, PutAlphaImage)
 {
     struct HIDDNouveauBitMapData * bmdata = OOP_INST_DATA(cl, o);
@@ -506,6 +660,19 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutAlphaImage)
 
     LOCK_ENGINE
     LOCK_BITMAP
+
+    if (STAGING_BOUNCE_WANTED)
+    {
+        struct nouveau_staging_ctx ctx = { cl, o, msg, NULL, NULL, NULL, bmdata->bytesperpixel };
+
+        if (HIDDNouveauNVC0StagingRect(carddata, bmdata, msg->x, msg->y,
+                msg->width, msg->height, nouveau_staging_alphaimage, &ctx))
+        {
+            UNLOCK_BITMAP
+            UNLOCK_ENGINE
+            return;
+        }
+    }
 
     /* Try hardware method NV10-NV40*/
     if (
@@ -568,7 +735,7 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutAlphaImage)
         {
             MAP_BUFFER
 
-            HIDDNouveauBitMapPutAlphaImage16(bmdata, msg->pixels, msg->modulo, msg->x, 
+            HIDDNouveauBitMapPutAlphaImage16(bmdata->bo->map, bmdata->pitch, msg->pixels, msg->modulo, msg->x, 
                 msg->y, msg->width, msg->height);
         }
         break;
@@ -577,7 +744,7 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutAlphaImage)
         {
             MAP_BUFFER
 
-            HIDDNouveauBitMapPutAlphaImage32(bmdata, msg->pixels, msg->modulo, msg->x, 
+            HIDDNouveauBitMapPutAlphaImage32(bmdata->bo->map, bmdata->pitch, msg->pixels, msg->modulo, msg->x, 
                 msg->y, msg->width, msg->height);
         }
         break;
@@ -647,6 +814,21 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutAlphaTemplate)
     struct HIDDNouveauBitMapData * bmdata = OOP_INST_DATA(cl, o);
     struct CardData * carddata = &(SD(cl)->carddata);
 
+    if (STAGING_BOUNCE_WANTED)
+    {
+        struct nouveau_staging_ctx ctx = { cl, o, NULL, msg, NULL, NULL, bmdata->bytesperpixel };
+        BOOL done;
+
+        LOCK_ENGINE
+        LOCK_BITMAP
+        done = HIDDNouveauNVC0StagingRect(carddata, bmdata, msg->x, msg->y,
+                msg->width, msg->height, nouveau_staging_alphatemplate, &ctx);
+        UNLOCK_BITMAP
+        UNLOCK_ENGINE
+        if (done)
+            return;
+    }
+
     /* Select acceleration method based on hardware and buffer size */
     if (GC_COLEXP(msg->gc) == vHidd_GC_ColExp_Transparent)
     {
@@ -707,14 +889,14 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutAlphaTemplate)
 
     case 2:
         {
-            HIDDNouveauBitMapPutAlphaTemplate16(bmdata, msg->gc, o, msg->invertalpha,
+            HIDDNouveauBitMapPutAlphaTemplate16(bmdata->bo->map, bmdata->pitch, msg->gc, o, msg->invertalpha,
                 msg->alpha, msg->modulo, msg->x, msg->y, msg->width, msg->height);
         }
         break;
 
     case 4:
         {
-            HIDDNouveauBitMapPutAlphaTemplate32(bmdata, msg->gc, o, msg->invertalpha,
+            HIDDNouveauBitMapPutAlphaTemplate32(bmdata->bo->map, bmdata->pitch, msg->gc, o, msg->invertalpha,
                 msg->alpha, msg->modulo, msg->x, msg->y, msg->width, msg->height);
         }
         break;
@@ -727,6 +909,21 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutTemplate)
 {
     struct HIDDNouveauBitMapData * bmdata = OOP_INST_DATA(cl, o);
     struct CardData * carddata = &(SD(cl)->carddata);
+
+    if (STAGING_BOUNCE_WANTED)
+    {
+        struct nouveau_staging_ctx ctx = { cl, o, NULL, NULL, msg, NULL, bmdata->bytesperpixel };
+        BOOL done;
+
+        LOCK_ENGINE
+        LOCK_BITMAP
+        done = HIDDNouveauNVC0StagingRect(carddata, bmdata, msg->x, msg->y,
+                msg->width, msg->height, nouveau_staging_template, &ctx);
+        UNLOCK_BITMAP
+        UNLOCK_ENGINE
+        if (done)
+            return;
+    }
 
     /* Select execution method based on hardware and buffer size */
     if (GC_COLEXP(msg->gc) == vHidd_GC_ColExp_Transparent)
@@ -779,6 +976,21 @@ VOID METHOD(NouveauBitMap, Hidd_BitMap, PutPattern)
 {
     struct HIDDNouveauBitMapData * bmdata = OOP_INST_DATA(cl, o);
     struct CardData * carddata = &(SD(cl)->carddata);
+
+    if (STAGING_BOUNCE_WANTED)
+    {
+        struct nouveau_staging_ctx ctx = { cl, o, NULL, NULL, NULL, msg, bmdata->bytesperpixel };
+        BOOL done;
+
+        LOCK_ENGINE
+        LOCK_BITMAP
+        done = HIDDNouveauNVC0StagingRect(carddata, bmdata, msg->x, msg->y,
+                msg->width, msg->height, nouveau_staging_pattern, &ctx);
+        UNLOCK_BITMAP
+        UNLOCK_ENGINE
+        if (done)
+            return;
+    }
 
     /* Select execution method based on hardware and buffer size */
     if (GC_COLEXP(msg->gc) == vHidd_GC_ColExp_Transparent)

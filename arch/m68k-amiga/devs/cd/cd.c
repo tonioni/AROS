@@ -28,34 +28,75 @@ struct cdUnit {
     struct MsgPort     *cu_MsgPort;
 };
 
-/* We have a synchonous task for dispatching IO
- * to each cd.device unit.
- */
-static VOID cdTask(IPTR base, IPTR unit)
+static BOOL cdRegisterVolume(struct cdUnit *unit, const struct DosEnvec *de);
+
+/* Each cd.device unit has a task which dispatches requests and services
+ * backend hardware completions. */
+static VOID cdTask(IPTR unit)
 {
     struct cdUnit *cu = (APTR)unit;
     struct IOStdReq *io;
+    ULONG portSignal;
+    BOOL running = TRUE;
 
     D(bug("%s.%d Task, Port %p\n", cu->cu_UnitOps->uo_Name, cu->cu_Unit, cu->cu_MsgPort));
-    do {
-        WaitPort(cu->cu_MsgPort);
-        io = (struct IOStdReq *)GetMsg(cu->cu_MsgPort);
 
-        D(bug("%s: Processing %p\n", __func__, io));
+    /* Blocking drive probes belong here, not in resident init: a
+     * misbehaving drive must cost a failed mount, not a wedged boot
+     * task. I/O queued by early openers is served after this returns.
+     */
+    if (cu->cu_UnitOps->uo_Init)
+        cu->cu_UnitOps->uo_Init(cu->cu_Private);
 
-        if (io->io_Flags & IOF_ABORT) {
-            io->io_Error = CDERR_ABORTED;
-        } else if (io->io_Unit == (struct Unit *)cu &&
-                   cu->cu_UnitOps->uo_DoIO != NULL) {
-            io->io_Error = cu->cu_UnitOps->uo_DoIO(io, cu->cu_Private);
-        } else {
-            io->io_Error = CDERR_NOCMD;
+    portSignal = 1UL << cu->cu_MsgPort->mp_SigBit;
+
+    while (running) {
+        Wait(portSignal | cu->cu_UnitOps->uo_SignalMask);
+
+        /* Hardware completion and AbortIO signals are serviced in task
+         * context. A backend may retain a long-running request while this
+         * task continues to accept independent commands on the unit port. */
+        if (cu->cu_UnitOps->uo_Service) {
+            while ((io = cu->cu_UnitOps->uo_Service(cu->cu_Private)) != NULL)
+                ReplyMsg(&io->io_Message);
         }
 
-        D(bug("%s: Reply %p\n", __func__, io));
-        ReplyMsg(&io->io_Message);
+        while ((io = (struct IOStdReq *)GetMsg(cu->cu_MsgPort)) != NULL) {
+            LONG result;
 
-    } while (io->io_Unit != NULL);
+            D(bug("%s: Processing %p\n", __func__, io));
+
+            if (io->io_Flags & IOF_ABORT) {
+                result = CDERR_ABORTED;
+            } else if (io->io_Unit == (struct Unit *)cu &&
+                       cu->cu_UnitOps->uo_DoIO != NULL) {
+                result = cu->cu_UnitOps->uo_DoIO(io, cu->cu_Private);
+            } else {
+                result = CDERR_NOCMD;
+            }
+
+            if (result != CDIO_PENDING) {
+                io->io_Error = result;
+                D(bug("%s: Reply %p\n", __func__, io));
+                ReplyMsg(&io->io_Message);
+            }
+
+            if (io->io_Unit == NULL) {
+                running = FALSE;
+                break;
+            }
+
+            /* A synchronous command can consume an unsolicited response
+             * which completes an older asynchronous operation. */
+            if (cu->cu_UnitOps->uo_Service) {
+                struct IOStdReq *completed;
+
+                while ((completed = cu->cu_UnitOps->uo_Service(
+                            cu->cu_Private)) != NULL)
+                    ReplyMsg(&completed->io_Message);
+            }
+        }
+    }
 
     /* Terminate by fallthough */
 }
@@ -74,7 +115,8 @@ static BOOL cdRegisterVolume(struct cdUnit *unit, const struct DosEnvec *de)
     {
         IPTR pp[24];
         
-        CopyMem((IPTR *)de, &pp[4], sizeof(IPTR)*de->de_TableSize);
+        /* de_TableSize is the highest valid index, not a count */
+        CopyMem((IPTR *)de, &pp[4], sizeof(IPTR)*(de->de_TableSize + 1));
 
         /* This should be dealt with using some sort of volume manager or such. */
         if (unit->cu_Unit < 10)
@@ -87,7 +129,8 @@ static BOOL cdRegisterVolume(struct cdUnit *unit, const struct DosEnvec *de)
         pp[2]                   = unit->cu_Unit;
         pp[DE_TABLESIZE    + 4] = DE_BOOTBLOCKS;
         pp[DE_BOOTPRI      + 4] = -10;
-        pp[DE_DOSTYPE      + 4] = AROS_MAKE_ID('C','D','F','S');
+        pp[DE_DOSTYPE      + 4] = de->de_DosType;
+        pp[DE_BAUD         + 4] = 0;
         pp[DE_CONTROL      + 4] = 0;
         pp[DE_BOOTBLOCKS   + 4] = 0;
     
@@ -95,6 +138,10 @@ static BOOL cdRegisterVolume(struct cdUnit *unit, const struct DosEnvec *de)
 
         if (devnode)
         {
+            /* CDVDFS peaks below 2 KB while booting Microcosm.  The generic
+             * MakeDosNode() default is 16 KB, all of it scarce chip RAM on
+             * a stock CD32. */
+            devnode->dn_StackSize = 4096;
             AddBootNode(pp[DE_BOOTPRI + 4], ADNF_STARTPROC, devnode, NULL);
             
             return TRUE;
@@ -125,18 +172,33 @@ LONG cdAddUnit(struct cdBase *cb, const struct cdUnitOps *ops, APTR priv, const 
     if (cu) {
         cu->cu_Private = priv;
         cu->cu_UnitOps = ops;
+        /* Assigned before the task starts: it names the boot node */
+        cu->cu_Unit    = cb->cb_MaxUnit++;
         cu->cu_Task = NewCreateTask(TASKTAG_PC, cdTask,
                                     TASKTAG_NAME, ops->uo_Name,
-                                    TASKTAG_ARG1, cb,
-                                    TASKTAG_ARG2, cu,
+                                    /* Match Commodore's CDUITask. */
+                                    TASKTAG_PRI, 15,
+                                    /*
+                                     * The unit task runs the drive
+                                     * protocol and sector delivery;
+                                     * measured peak stack use is well
+                                     * under 1 KB, and its stack is
+                                     * chip RAM on a stock CD32.
+                                     */
+                                    TASKTAG_STACKSIZE, 4096,
+                                    TASKTAG_ARG1, cu,
                                     TASKTAG_TASKMSGPORT, &cu->cu_MsgPort,
                                     TAG_END);
         if (cu->cu_Task) {
-            cu->cu_Unit = cb->cb_MaxUnit++;
+            /* Boot-node creation is deterministic initialization work, not
+             * part of the priority-15 hardware service task.  The backend
+             * supplies the filesystem type carried by this ROM, so this
+             * does not depend on FileSystem.resource registration timing. */
+            cdRegisterVolume(cu, de);
+
             ObtainSemaphore(&cb->cb_UnitsLock);
             ADDTAIL(&cb->cb_Units, &cu->cu_Node);
             ReleaseSemaphore(&cb->cb_UnitsLock);
-            cdRegisterVolume(cu, de);
             return cu->cu_Unit;
         }
         FreeVec(cu);
@@ -150,7 +212,10 @@ static int cd_Init(LIBBASETYPE *cb)
     NEWLIST(&cb->cb_Units);
     InitSemaphore(&cb->cb_UnitsLock);
 
-    /* Hand-hacked port for timer responses */
+    /* Hand-hacked port for timer responses. ReplyMsg() enqueues on
+     * mp_MsgList before signalling, so it must be a valid empty list.
+     */
+    NEWLIST(&cb->cb_TimerPort.mp_MsgList);
     cb->cb_TimerPort.mp_SigBit = SIGB_SINGLE;
     cb->cb_TimerPort.mp_Flags = PA_SIGNAL;
     cb->cb_TimerPort.mp_SigTask = FindTask(NULL);
@@ -214,7 +279,12 @@ AROS_LH1(void, BeginIO,
           iostd->io_Command,
           iostd->io_Length, iostd->io_Data, iostd->io_Offset));
 
-    io->io_Error = CDERR_NOCMD;
+    /* The request has been accepted for asynchronous processing.  Its final
+     * status is supplied by the unit task before the reply; exposing NOCMD
+     * here makes callers mistake a successfully queued SendIO() for an
+     * immediate failure.
+     */
+    io->io_Error = 0;
 
     io->io_Flags &= ~IOF_QUICK;
     PutMsg(cu->cu_MsgPort, &iostd->io_Message);
@@ -233,6 +303,7 @@ AROS_LH1(LONG, AbortIO,
     D(bug("%s.%d: %p\n", __func__, ((struct cdUnit *)(io->io_Unit))->cu_Unit, io));
     Forbid();
     io->io_Flags |= IOF_ABORT;
+    Signal(((struct cdUnit *)io->io_Unit)->cu_Task, SIGF_SINGLE);
     Permit();
 
     return TRUE;

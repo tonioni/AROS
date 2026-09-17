@@ -32,7 +32,7 @@ static BOOL bufferExpand(Buffer *out, LONG size, ShellState *ss)
             CopyMem(out->buf, tmp, out->len);
 
         if (out->mem > 0)
-            FreeMem(out->buf, out->mem);
+            FreeMem(out->buf, out->mem + 1);
 
         out->buf = tmp;
         out->mem = newSize;
@@ -73,7 +73,8 @@ LONG bufferCopy(Buffer *in, Buffer *out, ULONG size, ShellState *ss)
 {
     STRPTR s = in->buf + in->cur;
     LONG ret = bufferAppend(s, size, out, ss);
-    in->cur += size;
+    if (ret == 0)
+        in->cur += size;
     return ret;
 }
 

@@ -34,150 +34,24 @@
 #define ARM_PERIIOBASE (__arm_periiobase)
 
 uintptr_t __arm_periiobase = 0;
+unsigned int __arm_socid = 0;
+uintptr_t __vcmb_base = 0;
+uintptr_t __rp1_base = 0;
 
 extern void mem_init(void);
 extern unsigned int uartclock;
 extern unsigned int uartdivint;
 extern unsigned int uartdivfrac;
 extern unsigned int uartbaud;
+extern uintptr_t __uart_base;
 
-/*
- * AArch64 bootstrap entry point.
- *
- * On Raspberry Pi 3 in 64-bit mode, the firmware loads kernel8.img at 0x80000
- * and starts execution in EL2 (or EL1 depending on config.txt).
- *
- * Register state on entry:
- *   x0 = 32-bit pointer to device tree blob (DTB)
- *   x1 = 0 (reserved)
- *   x2 = 0 (reserved)
- *   x3 = 0 (reserved)
- *
- * We need to:
- *   1. Determine current Exception Level (EL3/EL2/EL1)
- *   2. Drop to EL1 if in higher EL
- *   3. Enable FP/NEON
- *   4. Set up stack
- *   5. Jump to C boot() function
- */
-asm("   .section .aros.startup      \n"
-"       .globl bootstrap            \n"
-"       .type bootstrap,%function   \n"
-"bootstrap:                         \n"
-        /* Only let core 0 boot; secondary cores spin */
-"       mrs     x4, MPIDR_EL1      \n"
-"       and     x4, x4, #0xFF      \n" /* Aff0 = core ID */
-"       cbnz    x4, secondary_spin \n"
-"                                   \n"
-"       mrs     x4, CurrentEL       \n" /* Get current exception level */
-"       lsr     x4, x4, #2          \n" /* Extract EL field (bits [3:2]) */
-"       cmp     x4, #3              \n"
-"       b.eq    from_el3            \n"
-"       cmp     x4, #2              \n"
-"       b.eq    from_el2            \n"
-"       b       at_el1              \n"
-"                                   \n"
-"from_el3:                          \n"
-"       mrs     x4, SCR_EL3         \n" /* Secure Configuration Register */
-"       orr     x4, x4, #(1 << 10) \n" /* RW bit - EL2 is AArch64 */
-"       orr     x4, x4, #(1 << 0)  \n" /* NS bit - Non-secure */
-"       msr     SCR_EL3, x4         \n"
-"       mov     x4, #0x3c9          \n" /* SPSR_EL3: EL2h, DAIF masked */
-"       msr     SPSR_EL3, x4        \n"
-"       adr     x4, from_el2        \n"
-"       msr     ELR_EL3, x4         \n"
-"       eret                        \n"
-"                                   \n"
-"from_el2:                          \n"
-"       mrs     x4, HCR_EL2         \n" /* Hypervisor Configuration Register */
-"       orr     x4, x4, #(1 << 31) \n" /* RW bit - EL1 is AArch64 */
-"       msr     HCR_EL2, x4         \n"
-"                                   \n"
-        /*
-         * SCTLR_EL1 is architecturally UNKNOWN out of reset when entered
-         * via EL2. Set a known-safe value (RES1 bits only: MMU/caches off,
-         * little-endian, no alignment checking) BEFORE the eret, using
-         * movz/movk so no memory access happens with an unknown EE bit.
-         */
-"       movz    x4, #0x0800         \n"
-"       movk    x4, #0x30d0, lsl #16\n" /* SCTLR_EL1 = 0x30d00800 */
-"       msr     SCTLR_EL1, x4       \n"
-"                                   \n"
-"       mov     x4, #0x3c5          \n" /* SPSR_EL2: EL1h, DAIF masked */
-"       msr     SPSR_EL2, x4        \n"
-"       adr     x4, at_el1          \n"
-"       msr     ELR_EL2, x4         \n"
-"                                   \n"
-        /* Enable CNTP for EL1 */
-"       mrs     x4, CNTHCTL_EL2     \n"
-"       orr     x4, x4, #3          \n" /* Enable EL1 physical timer access */
-"       msr     CNTHCTL_EL2, x4     \n"
-"       msr     CNTVOFF_EL2, xzr    \n" /* Virtual timer offset = 0 */
-"       eret                        \n"
-"                                   \n"
-"at_el1:                            \n"
-        /* Known-safe SCTLR_EL1 also when entered directly at EL1 */
-"       movz    x4, #0x0800         \n"
-"       movk    x4, #0x30d0, lsl #16\n"
-"       msr     SCTLR_EL1, x4       \n"
-"       isb                          \n"
-"                                    \n"
-        /* Install the bootstrap exception vectors: any fault during boot
-         * prints a diagnostic instead of silently hanging at an UNKNOWN
-         * VBAR (real HW; QEMU resets VBAR to 0) */
-"       ldr     x4, =boot_vectors   \n"
-"       msr     VBAR_EL1, x4        \n"
-"                                    \n"
-        /* Enable FP/NEON */
-"       mov     x4, #(3 << 20)      \n" /* CPACR_EL1: FPEN = 0b11 */
-"       msr     CPACR_EL1, x4       \n"
-"       isb                          \n"
-"                                    \n"
-        /* Set up stack pointer */
-"       ldr     x4, =0x80000        \n" /* Stack just below kernel load address */
-"       mov     sp, x4              \n"
-"                                    \n"
-        /* Save DTB pointer (x0) and jump to C */
-"       ldr     x4, =boot          \n"
-"       br      x4                  \n"
-"                                    \n"
-"secondary_spin:                    \n"
-"       wfe                         \n"
-"       b       secondary_spin      \n"
-"                                    \n"
-"       .section .text              \n"
-".byte 0                            \n"
-".string \"$VER: arosraspi-aarch64.img v40.46 (" __DATE__ ")\"\n"
-".byte 0                            \n"
-"\n\t\n\t"
-);
-
-/*
- * Minimal bootstrap exception vectors: every slot funnels into a C handler
- * that prints the fault syndrome and spins. Without this, VBAR_EL1 is
- * UNKNOWN on real hardware and any bootstrap-time fault (e.g. an unaligned
- * access while all memory is still Device-typed) becomes a silent hang.
- */
-asm("   .section .text              \n"
-"       .balign 2048                \n"
-"boot_vectors:                      \n"
-"       .rept 16                    \n"
-"       b       boot_exception      \n"
-"       .balign 128                 \n"
-"       .endr                       \n"
-);
-
-void boot_exception(void) __attribute__((used));
-void boot_exception(void)
+void boot_exception_handler(uint64_t esr, uint64_t elr, uint64_t far) __attribute__((used));
+void boot_exception_handler(uint64_t esr, uint64_t elr, uint64_t far)
 {
-    uint64_t esr, elr, far_r;
-
-    asm volatile("mrs %0, esr_el1" : "=r"(esr));
-    asm volatile("mrs %0, elr_el1" : "=r"(elr));
-    asm volatile("mrs %0, far_el1" : "=r"(far_r));
-
-    kprintf("[BOOT] EXCEPTION: ESR=%p ELR=%p FAR=%p\n",
-            (void *)(uintptr_t)esr, (void *)(uintptr_t)elr, (void *)(uintptr_t)far_r);
+    kprintf("\n[BOOT] *** EXCEPTION ***\n");
+    kprintf("[BOOT] ESR_EL1: 0x%016lx (EC=0x%lx)\n", esr, (esr >> 26) & 0x3F);
+    kprintf("[BOOT] ELR_EL1: 0x%016lx (fault PC)\n", elr);
+    kprintf("[BOOT] FAR_EL1: 0x%016lx (fault addr)\n", far);
 
     while (1)
         asm volatile("wfe");
@@ -208,8 +82,8 @@ void query_vmem()
     vc_msg[6] = 0;
     vc_msg[7] = 0;
 
-    vcmb_write(VCMB_BASE, VCMB_PROPCHAN, (void *)vc_msg);
-    vc_msg = vcmb_read(VCMB_BASE, VCMB_PROPCHAN);
+    vcmb_write(__vcmb_base, VCMB_PROPCHAN, (void *)vc_msg);
+    vc_msg = vcmb_read(__vcmb_base, VCMB_PROPCHAN);
 
     if (!vc_msg)
     {
@@ -265,8 +139,8 @@ void setup_arm_clock()
     vc_msg[5] = AROS_LONG2LE(3);            /* clock id 3 = ARM */
     vc_msg[6] = 0;
     vc_msg[7] = 0;
-    vcmb_write(VCMB_BASE, VCMB_PROPCHAN, (void *)vc_msg);
-    vc_msg = vcmb_read(VCMB_BASE, VCMB_PROPCHAN);
+    vcmb_write(__vcmb_base, VCMB_PROPCHAN, (void *)vc_msg);
+    vc_msg = vcmb_read(__vcmb_base, VCMB_PROPCHAN);
     if (!vc_msg)
         return;
     arm_cur = AROS_LE2LONG(vc_msg[6]);
@@ -279,8 +153,8 @@ void setup_arm_clock()
     vc_msg[5] = AROS_LONG2LE(3);
     vc_msg[6] = 0;
     vc_msg[7] = 0;
-    vcmb_write(VCMB_BASE, VCMB_PROPCHAN, (void *)vc_msg);
-    vc_msg = vcmb_read(VCMB_BASE, VCMB_PROPCHAN);
+    vcmb_write(__vcmb_base, VCMB_PROPCHAN, (void *)vc_msg);
+    vc_msg = vcmb_read(__vcmb_base, VCMB_PROPCHAN);
     if (!vc_msg)
         return;
     arm_max = AROS_LE2LONG(vc_msg[6]);
@@ -298,8 +172,8 @@ void setup_arm_clock()
         vc_msg[6] = AROS_LONG2LE(arm_max);
         vc_msg[7] = 0;                      /* skip_setting_turbo = 0 */
         vc_msg[8] = 0;
-        vcmb_write(VCMB_BASE, VCMB_PROPCHAN, (void *)vc_msg);
-        vc_msg = vcmb_read(VCMB_BASE, VCMB_PROPCHAN);
+        vcmb_write(__vcmb_base, VCMB_PROPCHAN, (void *)vc_msg);
+        vc_msg = vcmb_read(__vcmb_base, VCMB_PROPCHAN);
         if (vc_msg)
             kprintf("[BOOT] ARM clock set to %u Hz\n", AROS_LE2LONG(vc_msg[6]));
     }
@@ -383,6 +257,94 @@ void query_memory()
     }
 }
 
+/*
+ * The RP1 southbridge hangs off one of the BCM2712 PCIe host bridges.
+ * The CPU address of that window is not fixed across board and firmware revisions
+ * (0x1f_0000_0000 and 0x1c_0000_0000 both occur)
+ */
+static void query_rp1(void)
+{
+    of_node_t *axi = dt_find_node("/axi");
+    of_node_t *bridge;
+    of_property_t *p;
+    uint32_t parent_ac;
+
+    if (!axi)
+        return;
+
+    p = dt_find_property(axi, "#address-cells");
+    parent_ac = p ? AROS_BE2LONG(*(uint32_t *)p->op_value) : 2;
+
+    ForeachNode(&axi->on_children, bridge)
+    {
+        of_node_t *child;
+        uint32_t child_ac, child_sc, entry_cells;
+        volatile uint32_t *ranges;
+        int32_t cells;
+        int has_rp1 = 0;
+        uintptr_t win32 = 0, win64 = 0;
+
+        if (strncmp(bridge->on_name, "pcie", 4))
+            continue;
+
+        ForeachNode(&bridge->on_children, child)
+        {
+            if (!strncmp(child->on_name, "rp1", 4))
+                has_rp1 = 1;
+        }
+        if (!has_rp1)
+            continue;
+
+        p = dt_find_property(bridge, "#address-cells");
+        child_ac = p ? AROS_BE2LONG(*(uint32_t *)p->op_value) : 3;
+        p = dt_find_property(bridge, "#size-cells");
+        child_sc = p ? AROS_BE2LONG(*(uint32_t *)p->op_value) : 2;
+        entry_cells = child_ac + parent_ac + child_sc;
+
+        p = dt_find_property(bridge, "ranges");
+        if (!p)
+            return;
+
+        ranges = p->op_value;
+        cells = p->op_length / 4;
+
+        while (cells >= (int32_t)entry_cells)
+        {
+            /* The first child cell is the PCI space code, not an address. */
+            uint32_t space = AROS_BE2LONG(ranges[0]);
+            uint64_t addr_cpu = 0, addr_len = 0;
+            uint32_t i;
+
+            ranges += child_ac;
+            for (i = 0; i < parent_ac; i++)
+                addr_cpu = (addr_cpu << 32) | AROS_BE2LONG(*ranges++);
+            for (i = 0; i < child_sc; i++)
+                addr_len = (addr_len << 32) | AROS_BE2LONG(*ranges++);
+
+            kprintf("[BOOT] RP1 window: space %08x -> %p, %p bytes\n",
+                    space, addr_cpu, addr_len);
+
+            mmu_map_section(addr_cpu, addr_cpu, addr_len, 0, 0, 3, 0);
+
+            if (!win32 && ((space >> 24) & 0x03) == 0x02)
+                win32 = (uintptr_t)addr_cpu;
+            if (!win64 && ((space >> 24) & 0x03) == 0x03)
+                win64 = (uintptr_t)addr_cpu;
+
+            cells -= entry_cells;
+        }
+        /*
+            * Take the prefetchable window: the firmware allocates RP1's BAR1
+            * from it (UART0 answers at win64 + 0x30000), while the MEM32 entry
+            * describes where Linux will move RP1 once it re-enumerates PCIe.
+            * Both windows are the same on C1 and D0 - the d0 overlay does not
+            * touch them - so this is stepping-independent.
+            */
+        __rp1_base = win64;
+        kprintf("[BOOT] RP1 windows: mem32 %p, mem64 %p\n", win32, win64);
+        return;
+    }
+}
 
 void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3)
 {
@@ -404,8 +366,43 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
     mem_init();
 
     int dt_mem_usage = mem_avail();
+
     /* Parse device tree */
     dt_parse((void *)(uintptr_t)dtb_addr);
+
+    /*
+     * The SoC id gates the UART and mailbox register offsets, so it has to
+     * be known before serInit(). The tag itself is emitted further down.
+     */
+    {
+        of_node_t *r = dt_find_node("/");
+        of_property_t *compat = r ? dt_find_property(r, "compatible") : NULL;
+        IPTR plat = 0xc43; /* default: BCM2836/2837 (Raspberry Pi 2/3) */
+        if (compat)
+        {
+            const char *s = (const char *)compat->op_value;
+            int n = (int)compat->op_length, i;
+            for (i = 0; i + 7 <= n; i++)
+            {
+                if (s[i] == 'b' && s[i+1] == 'c' && s[i+2] == 'm' &&
+                    s[i+3] == '2' && s[i+4] == '7' && s[i+5] == '1' &&
+                    s[i+6] == '2')
+                {
+                    plat = 0x2712; /* BCM2712 (Raspberry Pi 5) */
+                    break;
+                }
+                if (s[i] == 'b' && s[i+1] == 'c' && s[i+2] == 'm' &&
+                    s[i+3] == '2' && s[i+4] == '7' && s[i+5] == '1' &&
+                    s[i+6] == '1')
+                {
+                    plat = 0xc44; /* BCM2711 (Raspberry Pi 4) */
+                    break;
+                }
+            }
+        }
+        __arm_socid = plat;
+    }
+
     dt_mem_usage -= mem_avail();
 
     /* Prepare mapping for peripherals. Use the data from device tree here */
@@ -463,6 +460,8 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
     else
         while(1) asm volatile("wfe");
 
+    __vcmb_base = __arm_periiobase + (__arm_socid == 0x2712 ? 0x7C013880 : 0xB880);
+
     /*
      * The Pi 4 describes additional MMIO windows on the /scb bus: the full
      * 0xFC000000 peripheral block (which contains the PCIe host bridge
@@ -509,7 +508,13 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
         }
     }
 
+    query_rp1();
+
     serInit();
+
+    boottag->ti_Tag = KRN_DebugUartBase;
+    boottag->ti_Data = __uart_base;   /* the address serInit() actually used */
+    boottag++;
 
     kprintf("\n\n[BOOT] AROS %s\n", bootstrapName);
     {
@@ -521,33 +526,20 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
     /*
      * Store the SoC id for the kernel's platform probe. The peripheral base
      * itself is taken from the device tree (/soc ranges) above, so it is
-     * already correct for either SoC; here we only distinguish the interrupt
-     * controller / timer family: BCM2836/2837 (Pi 2/3, legacy controller) vs
-     * BCM2711 (Pi 4, GIC-400), by scanning the root "compatible" list.
+     * already correct; this only tells the kernel which interrupt controller
+     * and timer family to expect. Scanned near the top of boot().
      */
     boottag->ti_Tag = KRN_Platform;
-    {
-        of_node_t *r = dt_find_node("/");
-        of_property_t *compat = r ? dt_find_property(r, "compatible") : NULL;
-        IPTR plat = 0xc43; /* default: BCM2836/2837 (Raspberry Pi 2/3) */
-        if (compat)
-        {
-            const char *s = (const char *)compat->op_value;
-            int n = (int)compat->op_length, i;
-            for (i = 0; i + 7 <= n; i++)
-            {
-                if (s[i] == 'b' && s[i+1] == 'c' && s[i+2] == 'm' &&
-                    s[i+3] == '2' && s[i+4] == '7' && s[i+5] == '1' &&
-                    s[i+6] == '1')
-                {
-                    plat = 0xc44; /* BCM2711 (Raspberry Pi 4) */
-                    break;
-                }
-            }
-        }
-        boottag->ti_Data = plat;
-        kprintf("[BOOT] SoC platform id 0x%x\n", (unsigned)plat);
-    }
+    boottag->ti_Data = __arm_socid;
+
+    kprintf("[BOOT] SoC platform id 0x%x\n", __arm_socid);
+
+    boottag++;
+
+    boottag->ti_Tag = KRN_PeripheralBase;
+    /* BCM2712 keeps the legacy block at bus 0x7C000000 into the window */
+    boottag->ti_Data = __arm_periiobase +
+                       (__arm_socid == 0x2712 ? 0x7C000000 : 0);
     boottag++;
 
     /*
@@ -591,8 +583,21 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
         kprintf("[BOOT] Configuring LEDs\n");
         ForeachNode(&e->on_children, led)
         {
+            /* BCM2712 has no BCM283x GPIO block: the ACT LED sits on a
+             * brcmstb controller and the PWR LED behind RP1. The GPFSEL
+             * pokes below would land blindly in the /soc window. */
+            if (__arm_socid == 0x2712)
+                continue;
+
             of_property_t *p = dt_find_property(led, "gpios");
+            of_property_t *st = dt_find_property(led, "status");
             int32_t gpio = 0;
+
+            /* The Pi 400 keeps a led-act node for a light it does not have
+             * and marks it disabled; driving its pin would clamp ID_SDA. */
+            if (st && !strncmp(st->op_value, "disabled", 9))
+                continue;
+
             if (p && p->op_length >= 8) {
                 uint32_t *data = p->op_value;
                 uint32_t phandle = AROS_BE2LONG(data[0]);
@@ -609,6 +614,9 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
                     {
                         int gpio_sel = gpio / 10;
                         int gpio_soff = 3 * (gpio - 10 * gpio_sel);
+                        of_property_t *trg = dt_find_property(led, "linux,default-trigger");
+                        int on = trg && !strncmp(trg->op_value, "default-on", 11);
+                        int low = (p->op_length >= 12) && (AROS_BE2LONG(data[2]) & 1);
 
                         kprintf("[BOOT] GPFSEL=%x, bit=%d\n", gpio_sel * 4, gpio_soff);
 
@@ -618,8 +626,9 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
                         tmp |= (1 << gpio_soff);
                         wr32le(GPFSEL0 + 4*gpio_sel, tmp);
 
-                        /* Turn LED off */
-                        wr32le(GPCLR0 + 4 * (gpio / 32), 1 << (gpio % 32));
+                        /* Turn LED off, leave PWR-LED on */
+                        wr32le((on != low ? GPSET0 : GPCLR0) + 4 * (gpio / 32),
+                               1 << (gpio % 32));
                     }
                 }
             }
@@ -809,7 +818,11 @@ void boot(uintptr_t dtb_addr, uintptr_t arch, uintptr_t dummy2, uintptr_t dummy3
 
         kprintf("[BOOT] Total sizes: ro=%ld rw=%ld\n", total_size_ro, total_size_rw);
 
-        kernel_phys = *mem_upper - total_size_ro - total_size_rw;
+        /* mem_upper follows the VideoCore split and is no 2MB multiple on
+         * every board; mmu_map_section() maps the 2MB block phys sits in,
+         * so an unaligned kernel_phys maps the kernel off its own image. */
+        kernel_phys = (*mem_upper - total_size_ro - total_size_rw)
+                          & ~(2*1024*1024UL - 1);
         kernel_virt = KERNEL_VIRT_ADDRESS;
 
         /*

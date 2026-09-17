@@ -5,7 +5,9 @@ include $(SRCDIR)/config/aros.cfg
 
 POSIXC := \
     __dos64 \
+    _exit \
     __exec \
+    __at \
     __fdesc \
     __fopen \
     __fseeko \
@@ -20,6 +22,7 @@ POSIXC := \
     __get_default_file \
     __rand48 \
     __stat \
+    __threadhook \
     __usergrp \
     __upath \
     __vfork \
@@ -96,6 +99,7 @@ POSIXC := \
     ftello \
     ftello64 \
     ftruncate \
+    ftruncate64 \
     funlockfile \
     fwrite \
     getc_unlocked \
@@ -161,6 +165,7 @@ POSIXC := \
     perror \
     pipe \
     popen \
+    posix_fadvise \
     posix_memalign \
     printf \
     pselect \
@@ -302,6 +307,7 @@ POSIXC_ARCH := \
 
 POSIXC_LINKLIB := \
     ctype \
+    fnmatch \
     ftime \
     gcvt \
     getopt \

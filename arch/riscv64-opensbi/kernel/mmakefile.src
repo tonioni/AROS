@@ -33,6 +33,7 @@ CFILES := \
         kernel_elf \
         getcpucount \
         getcpuattr \
+        getsystemattr \
         allocirq \
         freeirq \
         modifyirq \
@@ -68,7 +69,7 @@ kernel-opensbi-riscv64: $(OSGENDIR)/boot/core.elf
 
 #MM- kernel-opensbi-riscv64-quick: kernel-kernel-kobj-quick kernel-exec-kobj-quick kernel-task-kobj-quick kernel-opensbi-riscv64
 
-ELFCORELIBS := -L$(AROS_LIB) -larossupport -lautoinit -llibinit -lstdc.static
+ELFCORELIBS := -L$(AROS_LIB) -larossupport -lautoinit -lamiga -llibinit -lstdc.static
 ifeq ("$(AROS_TOOLCHAIN)","gnu")
 ELFCORELIBS += -L$(CROSSTOOLSDIR)/lib/gcc/$(AROS_TARGET_CPU)-aros/$(TARGET_GCC_VER) -lgcc
 endif
@@ -91,6 +92,7 @@ $(OSGENDIR)/boot/Image: $(OSGENDIR)/boot/core.elf
 #MM kernel-kernel-opensbi-riscv64 : includes
 
 USER_INCLUDES := $(PRIV_KERNEL_INCLUDES) -I$(GENINCDIR) -I$(AROS_DEVELOPER)/include
+USER_CPPFLAGS += -DAROS_ARCHITECTURE="\"$(AROS_TARGET_PLATFORM)\""
 
 %build_archspecific \
   mainmmake=kernel-kernel modname=kernel maindir=rom/kernel arch=opensbi-riscv64 \
