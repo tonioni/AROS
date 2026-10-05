@@ -832,7 +832,8 @@ BOOL setsprite(OOP_Class *cl, OOP_Object *o, WORD width, WORD height, struct pHi
     struct amigabm_data *data = OOP_INST_DATA(cl, o);
     OOP_Object *bmPFObj = NULL;
     HIDDT_PixelFormat *bmPF;
-    IPTR pf, bmcmod;
+    IPTR pf, bmcmod, bytesperpixel = 0;
+    BOOL indexed8;
     UWORD fetchsize;
     UWORD bitmapwidth = width;
     UWORD y, *p;
@@ -841,6 +842,8 @@ BOOL setsprite(OOP_Class *cl, OOP_Object *o, WORD width, WORD height, struct pHi
 
     OOP_GetAttr(msg->shape, aHidd_BitMap_PixFmt, (IPTR*)&bmPFObj);
     OOP_GetAttr(bmPFObj, aHidd_PixFmt_ColorModel, &bmcmod);
+    OOP_GetAttr(bmPFObj, aHidd_PixFmt_BytesPerPixel, &bytesperpixel);
+    indexed8 = bmcmod != vHidd_ColorModel_TrueColor && bytesperpixel == 1;
     if (bmcmod == vHidd_ColorModel_TrueColor)
     {
         OOP_GetAttr(bmPFObj, aHidd_PixFmt_StdPixFmt, (IPTR*)&pf);
@@ -863,13 +866,21 @@ BOOL setsprite(OOP_Class *cl, OOP_Object *o, WORD width, WORD height, struct pHi
             return FALSE;
         csd->sprite_width = width;
         csd->sprite_height = height;
-        csd->sprite_offset_x = msg->xoffset;
-        csd->sprite_offset_y = msg->yoffset;
     }
+    /* Pointer shapes of the same dimensions can have different hot spots. */
+    csd->sprite_offset_x = msg->xoffset;
+    csd->sprite_offset_y = msg->yoffset;
     p = csd->sprite;
     p += fetchsize;
     for(y = 0; y < height; y++) {
+        UBYTE rowpixels[64];
         UWORD xx, xxx, x;
+
+        if (indexed8)
+            HIDD_BM_GetImage(msg->shape, rowpixels, sizeof(rowpixels),
+                             0, y, bitmapwidth < width ? bitmapwidth : width,
+                             1, vHidd_StdPixFmt_Native);
+
         for (xx = 0, xxx = 0; xx < width; xx += 16, xxx++) {
             UWORD pix1 = 0, pix2 = 0;
             for(x = 0; x < 16; x++) {
@@ -877,7 +888,8 @@ BOOL setsprite(OOP_Class *cl, OOP_Object *o, WORD width, WORD height, struct pHi
                 if (xx + x < bitmapwidth)
                 {
                     if (bmcmod != vHidd_ColorModel_TrueColor)
-                        c = HIDD_BM_GetPixel(msg->shape, xx + x, y);
+                        c = indexed8 ? rowpixels[xx + x] :
+                            HIDD_BM_GetPixel(msg->shape, xx + x, y);
                     else
                     {
                         HIDDT_Pixel pix = HIDD_BM_GetPixel(msg->shape, xx + x, y);
@@ -993,7 +1005,7 @@ VOID setspritepos(struct amigavideo_staticdata *csd, WORD x, WORD y, UBYTE res, 
 
     x += csd->sprite_offset_x << res;
     x <<= (2 - res); // convert x to shres coordinates
-    x += (csd->startx - 1) << 2; // display left edge offset
+    x += csd->startx << 2; // sprite origin is not the bitplane fetch offset
  
     if (interlace)
         y >>= 1; // y is always in nonlaced
@@ -1353,7 +1365,8 @@ static BOOL gfx_vblank_attachbm(struct amigavideo_staticdata *csd, struct amigab
     }
     else
     {
-        screen_finish = bm->height - 1;
+        /* screen_finish is an absolute display coordinate. */
+        screen_finish = bm->topedge + bm->height - 1;
     }
     bm->displayheight = limitheight(csd, (screen_finish - screen_start) + 1, bm->interlace, FALSE);
     D(bug("[AmigaVideo] %s: screen range = %d -> %d (%d rows)\n", __func__, screen_start, screen_finish, bm->displayheight);)
@@ -1750,7 +1763,7 @@ static BOOL gfx_vblank_doupdatescroll(struct amigavideo_staticdata *csd)
                 bm->displayheight = limitheight(csd, (bmend - bm->topedge), bm->interlace, FALSE);
             }
             else
-                bm->displayheight = limitheight(csd, (bm->height - bm->topedge), bm->interlace, FALSE);
+                bm->displayheight = limitheight(csd, bm->height, bm->interlace, FALSE);
             if (bm->displayheight > 1)
             {
                 setcopperscroll(csd, csd->updatescroll, ((csd->interlaced == TRUE) || (csd->updatescroll->interlace == TRUE)));
@@ -1850,8 +1863,15 @@ static AROS_INTH1(gfx_vblank, struct amigavideo_staticdata*, csd)
       }
     }
 
-    if (bqvar & BQ_BEAMSYNC)
+    if (bqvar & BQ_BEAMSYNC) {
         bqvar |= BQ_MISSED;
+        /* A queued beam target may fall beyond this field. Once the beam
+         * wraps, restart the waiting queue rather than relying on an alarm
+         * for a position that the field could not reach.
+         */
+        if (bqvar & BQ_BEAMSYNCWAITING)
+            custom->intreq = INTF_SETCLR | INTF_BLIT;
+    }
 
     return FALSE;
 

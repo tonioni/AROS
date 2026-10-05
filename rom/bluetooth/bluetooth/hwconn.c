@@ -548,6 +548,10 @@ static const struct bt_sdp_record *bSDPRecordAt(void *context, size_t index)
     btLockReadBase();
     for(bsr = (struct BtServiceRecord *) BluetoothBase->bt_ServiceRecords.lh_Head; bsr->bsr_Node.ln_Succ;
         bsr = (struct BtServiceRecord *) bsr->bsr_Node.ln_Succ) {
+        if((bsr->bsr_Protocol == BSVP_ATT) || !bsr->bsr_Enabled) {
+            continue; /* GATT services are not in the SDP database, and neither
+                         is what the user does not want offered */
+        }
         if(n++ == index) {
             cn->cn_SDPRecTmp.handle = bsr->bsr_Handle;
             cn->cn_SDPRecTmp.attrs = bsr->bsr_Attrs;
@@ -600,7 +604,7 @@ static bool bRFCOMMAccept(void *context, uint8_t channel, bt_rfcomm_dlc_fn *cb, 
     btLockReadBase();
     for(bsr = (struct BtServiceRecord *) BluetoothBase->bt_ServiceRecords.lh_Head; bsr->bsr_Node.ln_Succ;
         bsr = (struct BtServiceRecord *) bsr->bsr_Node.ln_Succ) {
-        if((bsr->bsr_Protocol == BSVP_RFCOMM) && (bsr->bsr_Channel == channel)) {
+        if((bsr->bsr_Protocol == BSVP_RFCOMM) && (bsr->bsr_Channel == channel) && bsr->bsr_Enabled) {
             found = bsr;
             break;
         }
@@ -917,6 +921,7 @@ static void bConnUp(struct BtHWConn *cn, UWORD handle, UBYTE role)
     bt_sdp_client_init(&cn->cn_SDP, &cn->cn_L2CAP);
     bt_gatt_client_init(&cn->cn_GATT, &cn->cn_L2CAP);
     bt_gatt_client_set_notify_handler(&cn->cn_GATT, bGATTNotify, cn);
+    bGattSrvInit(cn);
 
     if(cn->cn_LinkType == BDLT_ACL) {
         /* the peer may browse our SDP records and connect to the RFCOMM
@@ -989,6 +994,10 @@ static void bConnUp(struct BtHWConn *cn, UWORD handle, UBYTE role)
         p[1] = handle >> 8;
         bSubmitCmd(hc, HC_OP_AUTH_REQUESTED, p, 2, bIgnoreCompletion, hc);
     }
+    if((cn->cn_LinkType == BDLT_LE) && (role == BDR_PERIPHERAL) && !(bd->bd_Flags & BDFF_REGISTERED)) {
+        /* somebody who came for our GATT services: we want nothing of theirs */
+        cn->cn_Enumerated = TRUE;
+    }
     /* enumerate this bearer's services once (each bearer of a dual-mode device
        enumerates independently, accumulating onto the one device). A pending
        re-encryption defers this until the Encryption Change event. */
@@ -1029,6 +1038,9 @@ static void bConnDown(struct BtHWConn *cn, LONG error, UBYTE reason)
     }
     cn->cn_State = HCNS_FREE;
     cn->cn_Reason = reason;
+    if(wasup && (cn->cn_LinkType == BDLT_LE)) {
+        bGattSrvRefresh(hc); /* advertise again if we are asked to */
+    }
 
     while((mn = cn->cn_Endpoints.mlh_Head)->mln_Succ) {
         bFreeHWEndpoint((struct BtHWEndpoint *) mn, error); /* removes the node */
@@ -1854,6 +1866,23 @@ static void bGATTConnectCB(bool success, void *user_data)
 }
 /* \\\ */
 
+/* /// "bGattUUID()" */
+/* The UUID of a discovered service or characteristic the way BtService and
+   BtEndpoint keep it: 16 bytes, most significant first. */
+static void bGattUUID(UBYTE *uuid, UWORD uuid16, const UBYTE *le128)
+{
+    ULONG n;
+
+    if(uuid16) {
+        bUUID16To128(uuid16, uuid);
+        return;
+    }
+    for(n = 0; n < 16; n++) {
+        uuid[n] = le128[15 - n];
+    }
+}
+/* \\\ */
+
 /* /// "bGATTEnumCB()" */
 static void bGATTEnumCB(struct bt_gatt_client_completion *completion, void *user_data)
 {
@@ -1931,12 +1960,15 @@ static void bGATTEnumCB(struct bt_gatt_client_completion *completion, void *user
         btLockWriteDevice(bd);
         for(n = 0; n < cn->cn_EnumCount; n++) {
             struct BtService *bsv;
+            UBYTE su[16];
             UWORD k;
+            bGattUUID(su, cn->cn_Services[n].uuid16, cn->cn_Services[n].uuid128);
             /* a bound service survived bClearServices() (its binding owns
                channels and holds the pointer): refresh it in place instead
                of listing it a second time */
             for(bsv = (struct BtService *) bd->bd_Services.lh_Head; bsv->bsv_Node.ln_Succ; bsv = (struct BtService *) bsv->bsv_Node.ln_Succ) {
-                if((bsv->bsv_Protocol != BSVP_ATT) || (bsv->bsv_UUID16 != cn->cn_Services[n].uuid16)) {
+                if((bsv->bsv_Protocol != BSVP_ATT) || (bsv->bsv_UUID16 != cn->cn_Services[n].uuid16) ||
+                   (!bsv->bsv_UUID16 && memcmp(bsv->bsv_UUID, su, 16))) {
                     continue;
                 }
                 for(k = 0; k < n; k++) {
@@ -1961,11 +1993,12 @@ static void bGATTEnumCB(struct bt_gatt_client_completion *completion, void *user
                 STRPTR nm;
                 bsv->bsv_Protocol = BSVP_ATT;
                 bsv->bsv_UUID16 = cn->cn_Services[n].uuid16;
-                bUUID16To128(bsv->bsv_UUID16, bsv->bsv_UUID);
+                CopyMem(su, bsv->bsv_UUID, 16);
                 bsv->bsv_StartHandle = cn->cn_Services[n].start_handle;
                 bsv->bsv_EndHandle = cn->cn_Services[n].end_handle;
                 bsv->bsv_IsPrimary = TRUE;
-                nm = btNumToStr(BNTS_UUID16, bsv->bsv_UUID16, NULL);
+                /* a 128-bit UUID is a vendor's own: no name on record */
+                nm = bsv->bsv_UUID16 ? btNumToStr(BNTS_UUID16, bsv->bsv_UUID16, NULL) : NULL;
                 bsv->bsv_Name = btCopyStr(nm ? nm : (STRPTR) "GATT service");
                 bsv->bsv_Node.ln_Name = bsv->bsv_Name;
                 bUUIDToStr(bsv->bsv_UUID, (STRPTR) ustr);
@@ -1994,12 +2027,15 @@ static void bGATTEnumCB(struct bt_gatt_client_completion *completion, void *user
                 UWORD endh = (n + 1 < completion->count) ?
                              (completion->characteristics[n + 1].declaration_handle - 1) : bsv->bsv_EndHandle;
                 struct BtEndpoint *byuuid = NULL;
+                UBYTE cu[16];
+                bGattUUID(cu, uuid, completion->characteristics[n].uuid128);
                 /* a kept service already has endpoints and classes hold
                    pointers to them: update the matching one in place - by
                    value handle, else the next unclaimed one of that UUID
                    (a HID service has several Report characteristics) */
                 for(bep = (struct BtEndpoint *) bsv->bsv_Endpoints.lh_Head; bep->bep_Node.ln_Succ; bep = (struct BtEndpoint *) bep->bep_Node.ln_Succ) {
-                    if((bep->bep_Type != BEPT_GATT_CHAR) || bep->bep_EnumMark || (bep->bep_UUID16 != uuid)) {
+                    if((bep->bep_Type != BEPT_GATT_CHAR) || bep->bep_EnumMark || (bep->bep_UUID16 != uuid) ||
+                       (!uuid && memcmp(bep->bep_UUID, cu, 16))) {
                         continue;
                     }
                     if(bep->bep_Handle == vh) {
@@ -2032,7 +2068,7 @@ static void bGATTEnumCB(struct bt_gatt_client_completion *completion, void *user
                     bep->bep_Type = BEPT_GATT_CHAR;
                     bep->bep_Handle = vh;
                     bep->bep_UUID16 = uuid;
-                    bUUID16To128(bep->bep_UUID16, bep->bep_UUID);
+                    CopyMem(cu, bep->bep_UUID, 16);
                     bep->bep_Properties = props;
                     bep->bep_CanRead = (props & 0x30) ? TRUE : FALSE;  /* notify | indicate */
                     bep->bep_CanWrite = (props & 0x0c) ? TRUE : FALSE; /* write | write without response */
@@ -2041,8 +2077,10 @@ static void bGATTEnumCB(struct bt_gatt_client_completion *completion, void *user
                        handle and the next declaration (or the service end) */
                     bep->bep_EndHandle = endh;
                     bep->bep_EnumMark = 1;
-                    nm = btNumToStr(BNTS_UUID16, bep->bep_UUID16, NULL);
-                    bep->bep_Name = nm ? btCopyStr(nm) : btCopyStrFmt("Characteristic 0x%04lx", bep->bep_UUID16);
+                    nm = uuid ? btNumToStr(BNTS_UUID16, bep->bep_UUID16, NULL) : NULL;
+                    bep->bep_Name = nm ? btCopyStr(nm) :
+                                    (uuid ? btCopyStrFmt("Characteristic 0x%04lx", bep->bep_UUID16) :
+                                            btCopyStr((STRPTR) "Vendor characteristic"));
                     bep->bep_Node.ln_Name = bep->bep_Name;
                 }
             }
@@ -3293,9 +3331,14 @@ BOOL bConnHandleEvent(struct BtHWCore *hc, UBYTE code, const UBYTE *params, ULON
                 return(TRUE);
             }
             BOOL autoconn = FALSE;
+            BOOL incoming;
             status = params[1];
             handle = (params[2] | (params[3] << 8)) & 0x0fff;
-            if(hc->hc_AutoConnArmed && !(hc->hc_Connecting && (hc->hc_Connecting->cn_LinkType == BDLT_LE))) {
+            /* a device that answered our advertising (we are the peripheral):
+               nothing to do with the connections we initiate */
+            incoming = !status && (params[4] == 0x01);
+            if(hc->hc_AutoConnArmed && !incoming &&
+               !(hc->hc_Connecting && (hc->hc_Connecting->cn_LinkType == BDLT_LE))) {
                 /* the controller's own initiator (accept list) answered: a
                    link to one of ours, or the cancel bAutoConnDisarm() asked
                    for (status 0x02, no address). A BR/EDR page in flight is
@@ -3320,6 +3363,9 @@ BOOL bConnHandleEvent(struct BtHWCore *hc, UBYTE code, const UBYTE *params, ULON
                 bConnDown(cn, BTIOERR_CONNFAILED, status);
                 bStartNextConnect(hc);
                 return(TRUE);
+            }
+            if(!bd && incoming && BluetoothBase->bt_LEAdvertising) {
+                bd = bNoteIncomingLE(hc, &params[6], params[5]);
             }
             if(!bd) {
                 /* the address may be unknown to us when the peer used a
@@ -3351,6 +3397,10 @@ BOOL bConnHandleEvent(struct BtHWCore *hc, UBYTE code, const UBYTE *params, ULON
                 bConnDown(cn, BTIOERR_CONNFAILED, status);
             } else {
                 bConnUp(cn, handle, params[4] ? BDR_PERIPHERAL : BDR_CENTRAL);
+            }
+            if(incoming) {
+                /* the controller stopped advertising for this link */
+                bGattSrvRefresh(hc);
             }
             if(autoconn) {
                 bAutoConnDone(hc);   /* re-arms for the others, resumes a deferred discovery */

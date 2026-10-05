@@ -16,12 +16,9 @@
 #include "processor_intern.h"
 #include "processor_arch_intern.h"
 
-/* Measured rather than requested rate; not in videocore.h. The firmware
- * reports a setpoint the core is not actually running at. */
-#define VCTAG_GETCLKRATE_MEASURED   0x00030047
-
 #define MBOXMSG_WORDS   8
-#define MBOXMSG_SIZE    (MBOXMSG_WORDS * 4 + 16)
+/* A whole cache line of its own; see MBOX_MSG_ALIGN in <proto/mbox.h>. */
+#define MBOXMSG_SIZE    (MBOX_MSG_ALIGN + (MBOX_MSG_ALIGN - 1))
 
 APTR MBoxBase = NULL;
 
@@ -43,10 +40,9 @@ static UQUAD vcQueryClock(struct ProcessorBase *ProcessorBase, ULONG tag, ULONG 
         __arm_periiobase = (IPTR)KrnGetSystemAttr(KATTR_PeripheralBase);
     }
 
-    /* The mailbox requires the message to be 16-byte aligned. */
     if ((msg_ = AllocMem(MBOXMSG_SIZE, MEMF_PUBLIC | MEMF_CLEAR)) == NULL)
         return 0;
-    msg = (unsigned int *)((((IPTR)msg_) + 15) & ~15);
+    msg = (unsigned int *)((((IPTR)msg_) + (MBOX_MSG_ALIGN - 1)) & ~(IPTR)(MBOX_MSG_ALIGN - 1));
 
     msg[0] = AROS_LONG2LE(MBOXMSG_WORDS * 4);
     msg[1] = AROS_LONG2LE(VCTAG_REQ);
@@ -90,7 +86,7 @@ UQUAD GetCurrentProcessorFrequency(struct ProcessorBase *ProcessorBase, struct A
             info->MaxCPUFrequency = vcQueryClock(ProcessorBase, VCTAG_GETCLKMAX, VCCLOCK_ARM);
 
         /* Fall back to the setpoint on firmware without the measured tag. */
-        if ((info->CPUFrequency = vcQueryClock(ProcessorBase, VCTAG_GETCLKRATE_MEASURED, VCCLOCK_ARM)) == 0)
+        if ((info->CPUFrequency = vcQueryClock(ProcessorBase, VCTAG_GETCLKMEASURED, VCCLOCK_ARM)) == 0)
             info->CPUFrequency = vcQueryClock(ProcessorBase, VCTAG_GETCLKRATE, VCCLOCK_ARM);
 
         if (info->CPUFrequency == 0)

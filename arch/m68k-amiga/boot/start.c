@@ -1059,6 +1059,8 @@ void exec_boot(ULONG *membanks, ULONG *cpupcr)
             DEBUGPUTS(("PANIC! Can't allocate a new stack for Exec!\n"));
             Early_Alert(CODE_ALLOC_FAIL);
         }
+        PrivExecBase(SysBase)->PlatformData.BootStack = usp;
+        PrivExecBase(SysBase)->PlatformData.BootStackSize = size;
 
         /* Leave supervisor mode, switch power led on */
         asm volatile (

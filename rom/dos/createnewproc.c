@@ -23,19 +23,10 @@
 #include <proto/m68kemu.h>
 
 #include "dos_intern.h"
-#include <dos_platform.h>
 #include LC_LIBDEFS_FILE
 #include <string.h>
 
 #define SEGARRAY_LENGTH 6       /* Minimum needed for HUNK overlays */
-
-#ifndef PROC_STACKSIZE
-#define PROC_STACKSIZE AROS_STACKSIZE
-#endif
-
-#ifndef PROC_MINSTACKSIZE
-#define PROC_MINSTACKSIZE PROC_STACKSIZE
-#endif
 
 static void DosEntry(void);
 static void freeLocalVars(struct Process *process, struct DosLibrary *DOSBase);
@@ -71,9 +62,10 @@ void internal_ChildFree(APTR tid, struct DosLibrary * DOSBase);
     NOTES
         NP_Affinity places the process on a set of CPUs. It only does
         anything on an SMP build; elsewhere it is accepted and ignored.
-        Without it the process inherits the CPU it was created on. The
+        Without it the process inherits its parent's affinity. The
         mask comes from KrnAllocCPUMask() and becomes the system's to
-        free, as for TASKTAG_AFFINITY.
+        free, as for TASKTAG_AFFINITY. SetTaskAffinity() changes it
+        afterwards.
 
         It is possible to supply NP_Input, NP_Output and NP_Error tags
         with BNULL values. This is equal to NIL: handle, however if NP_Input

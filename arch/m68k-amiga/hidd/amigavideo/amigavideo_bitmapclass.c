@@ -113,7 +113,9 @@ OOP_Object *AmigaVideoBM__Root__New(OOP_Class *cl, OOP_Object *o, struct pRoot_N
 
     /* We cache some info */
     data->width = width;
-    data->bytesperrow = ((width + data->align - 1) & ~(data->align - 1)) / 8;
+    /* Interleaved bitmaps advance past every plane to reach the next row. */
+    data->bytesperrow = pbm ? pbm->BytesPerRow :
+        ((width + data->align - 1) & ~(data->align - 1)) / 8;
     data->height = height;
     data->depth = depth;
     data->pixelcacheoffset = -1;
@@ -1055,6 +1057,8 @@ BOOL AmigaVideoBM__Hidd_PlanarBM__SetBitMap(OOP_Class *cl, OOP_Object *o,
 
         data->pbm = msg->bitMap;
         data->width = msg->bitMap->BytesPerRow << 3;
+        if ((msg->bitMap->Flags & BMF_INTERLEAVED) && msg->bitMap->Depth)
+            data->width /= msg->bitMap->Depth;
         data->bytesperrow = msg->bitMap->BytesPerRow;
         data->height = msg->bitMap->Rows;
         data->depth = msg->bitMap->Depth;

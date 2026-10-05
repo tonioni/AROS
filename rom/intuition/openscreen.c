@@ -1480,6 +1480,14 @@ static const char THIS_FILE[] = __FILE__;
 #endif
     screen->ModeID = modeid;
 
+#ifdef __mc68000__
+    /* Classic Intuition mirrors the ModeID's legacy mode word into the
+     * ViewPort before attaching its ColorMap. For monitor-qualified modes
+     * this includes the system-owned EXTENDED_MODE bit. */
+    if (modeid != INVALID_ID)
+        screen->Screen.ViewPort.Modes = (UWORD)modeid | SPRITES;
+#endif
+
     if (ok)
     {
         struct ViewPortExtra *vpe = (struct ViewPortExtra *)GfxNew(VIEWPORT_EXTRA_TYPE);
@@ -2316,6 +2324,13 @@ static const char THIS_FILE[] = __FILE__;
 
     if (!ok)
     {
+        /* The bar layer is a child of the root layer: delete it before ThinLayerInfo() drops the root */
+        if (screen->Screen.BarLayer)
+        {
+            DEBUG_OPENSCREEN(dprintf("OpenScreen: KillScreenBar\n"));
+            KillScreenBar(&screen->Screen, IntuitionBase);
+        }
+
         if (li_inited)
         {
             DEBUG_OPENSCREEN(dprintf("OpenScreen: Get ThinLayerInfo\n"));
@@ -2339,12 +2354,6 @@ static const char THIS_FILE[] = __FILE__;
 #endif
 
             FreeColorMap(screen->Screen.ViewPort.ColorMap);
-        }
-
-        if (screen->Screen.BarLayer)
-        {
-            DEBUG_OPENSCREEN(dprintf("OpenScreen: KillScreenBar\n"));
-            KillScreenBar(&screen->Screen, IntuitionBase);
         }
 
         if (screen->DInfo.dri_Customize)

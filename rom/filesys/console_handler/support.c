@@ -511,6 +511,10 @@ WORD scan_input(struct filehandle *fh, UBYTE *buffer)
         D(bug("scan_input: check char %d\n", c));
         switch (c)
         {
+        case 1: /* CTRL-A */
+            result = INP_HOME;
+            break;
+
         case 3:
         case 4:
         case 5:
@@ -539,6 +543,10 @@ WORD scan_input(struct filehandle *fh, UBYTE *buffer)
             result = INP_LINEFEED;
             break;
 
+        case 11: /* CTRL-K */
+            result = INP_CONTROL_K;
+            break;
+
         case 12: /* CTRL-L */
             *buffer = c;
             result = INP_ECHO_STRING;
@@ -559,8 +567,20 @@ WORD scan_input(struct filehandle *fh, UBYTE *buffer)
             }
             break;
 
+        case 21: /* CTRL-U */
+            result = INP_SHIFT_BACKSPACE;
+            break;
+
         case 24:
             result = INP_CONTROL_X;
+            break;
+
+        case 25: /* CTRL-Y */
+            result = INP_CONTROL_Y;
+            break;
+
+        case 26: /* CTRL-Z */
+            result = INP_END;
             break;
 
         case 28: /* CTRL-\ */
@@ -658,12 +678,14 @@ void history_walk(struct filehandle *fh, WORD inp)
         switch (inp)
         {
         case INP_SHIFT_CURSORUP:
-            fh->historyviewpos = 0;
+            fh->historyviewpos = (fh->historysize == CMD_HISTORY_SIZE)
+                ? fh->historypos : 0;
             break;
 
         case INP_SHIFT_CURSORDOWN:
-            fh->historyviewpos = fh->historysize - 1;
-            ;
+            fh->historyviewpos = fh->historypos - 1;
+            if (fh->historyviewpos < 0)
+                fh->historyviewpos = fh->historysize - 1;
             break;
 
         case INP_CURSORUP:
@@ -946,6 +968,52 @@ BOOL process_input(struct filehandle *fh)
             {
                 fh->inputsize = fh->inputpos;
                 do_eraseinline(fh);
+            }
+            break;
+
+        case INP_CONTROL_K:
+            fh->killsize = fh->inputsize - fh->inputpos;
+            if (fh->killsize > 0)
+            {
+                CopyMem(&fh->inputbuffer[fh->inputpos],
+                    fh->killbuffer, fh->killsize);
+                fh->killbuffer[fh->killsize] = '\0';
+
+                fh->inputsize = fh->inputpos;
+                do_eraseinline(fh);
+            }
+            else
+            {
+                fh->killbuffer[0] = '\0';
+            }
+            break;
+
+        case INP_CONTROL_Y:
+            if ((fh->killsize > 0) &&
+                (fh->inputsize + fh->killsize <= INPUTBUFFER_SIZE))
+            {
+                WORD chars_right = fh->inputsize - fh->inputpos;
+
+                if (chars_right > 0)
+                {
+                    do_cursorvisible(fh, FALSE);
+                    do_write(fh, fh->killbuffer, fh->killsize);
+                    do_write(fh, &fh->inputbuffer[fh->inputpos], chars_right);
+                    do_movecursor(fh, CUR_LEFT, chars_right);
+                    do_cursorvisible(fh, TRUE);
+
+                    memmove(&fh->inputbuffer[fh->inputpos + fh->killsize],
+                        &fh->inputbuffer[fh->inputpos], chars_right);
+                }
+                else
+                {
+                    do_write(fh, fh->killbuffer, fh->killsize);
+                }
+
+                CopyMem(fh->killbuffer, &fh->inputbuffer[fh->inputpos],
+                    fh->killsize);
+                fh->inputpos += fh->killsize;
+                fh->inputsize += fh->killsize;
             }
             break;
 
