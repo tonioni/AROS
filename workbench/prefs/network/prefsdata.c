@@ -4,6 +4,12 @@
 
 #include <proto/dos.h>
 #include <proto/exec.h>
+#include <proto/intuition.h>
+#include <dos/dosextens.h>
+#include <exec/ports.h>
+#include <bsdsocket/socketbasetags.h>
+#include <bsdsocket/netcontrol.h>
+#include <intuition/intuition.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -493,13 +499,9 @@ BOOL WriteNetworkPrefs(CONST_STRPTR  destdir)
         }
     }
 
-    if (!GetDHCP())
-    {
-        fprintf(ConfFile, "; Domain names\n");
-        fprintf(ConfFile, "; Name servers\n");
-        fprintf(ConfFile, "NAMESERVER %s\n", GetDNS(0));
-        fprintf(ConfFile, "NAMESERVER %s\n", GetDNS(1));
-    }
+    /* DNS is written per interface, per protocol by the net4/net6 plugins
+     * (DNS=/DNS6= tokens on each interface line); there is no global
+     * NAMESERVER block any more. */
     fclose(ConfFile);
 
     CombinePath2P(filename, filenamelen, destdbdir, "static-routes");
@@ -750,9 +752,104 @@ BOOL IsStackRunning()
     return FindTask("bsdsocket.library") != NULL;
 }
 
+/* Outcome of an in-place reload attempt. */
+enum
+{
+    RELOAD_NO_PORT = 0,   /* no control port: older stack, no reload capability */
+    RELOAD_OK,            /* stack reconfigured in place                        */
+    RELOAD_FAILED         /* control port present but the reload reported error */
+};
+
+/*
+ * Ask the running stack to reconfigure in place via its control port.
+ * Distinguishes "no port" (older stack - caller should fall back silently)
+ * from "port present but the reload failed" (caller should ask the user before
+ * the disruptive full restart).  RELOAD_OK means the bsdsocket.library task
+ * stayed alive and consumers holding the library open are undisturbed.
+ */
+static int TryReloadStack(void)
+{
+    struct MsgPort *reply, *ctrl;
+    struct NetControlMsg msg;
+    int result = RELOAD_NO_PORT;
+
+    reply = CreateMsgPort();
+    if (reply == NULL)
+        return RELOAD_NO_PORT;   /* cannot even try; fall back silently */
+
+    Forbid();
+    ctrl = FindPort(AROSTCP_CTRLPORT_NAME);
+    if (ctrl != NULL)
+    {
+        memset(&msg, 0, sizeof(msg));
+        msg.ncm_Msg.mn_Node.ln_Type = NT_MESSAGE;
+        msg.ncm_Msg.mn_ReplyPort    = reply;
+        msg.ncm_Msg.mn_Length       = sizeof(msg);
+        msg.ncm_Command             = NCMD_RELOAD;
+        PutMsg(ctrl, (struct Message *)&msg);
+    }
+    Permit();
+
+    if (ctrl != NULL)
+    {
+        /* reply arrives once the stack has finished reconfiguring */
+        WaitPort(reply);
+        GetMsg(reply);
+        result = (msg.ncm_Result == 0) ? RELOAD_OK : RELOAD_FAILED;
+    }
+
+    DeleteMsgPort(reply);
+    return result;
+}
+
+/*
+ * Ask whether to force a full stack restart after an in-place reload failed.
+ * Returns TRUE if the user chose "Force Restart", FALSE for "Cancel".  Uses a
+ * plain intuition requester (no MUI app/window pointer available here).
+ */
+static BOOL ForceRestartRequester(void)
+{
+    struct EasyStruct es =
+    {
+        sizeof(struct EasyStruct), 0,
+        "Network",
+        "In-place reload failed. Force a full stack restart?\n"
+        "This stops and relaunches AROSTCP and will disconnect\n"
+        "programs currently using the network.",
+        "Force Restart|Cancel"
+    };
+
+    /* EasyRequest: 1 = first gadget (Force Restart), 0 = last (Cancel). */
+    return (EasyRequestArgs(NULL, &es, NULL, NULL) == 1);
+}
+
 BOOL RestartStack()
 {
     ULONG trycount = 0;
+
+    /*
+     * Prefer an in-place reload.  If the running stack reconfigures itself
+     * through its control port, the bsdsocket.library task stays alive and no
+     * kill+relaunch is needed.
+     *   - no control port (older stack): fall back silently to kill+relaunch;
+     *   - reload succeeded: done, nothing else to do;
+     *   - reload failed: ask before the disruptive full restart.
+     */
+    if (IsStackRunning())
+    {
+        switch (TryReloadStack())
+        {
+        case RELOAD_OK:
+            return TRUE;
+        case RELOAD_FAILED:
+            if (!ForceRestartRequester())
+                return FALSE;   /* user cancelled: leave the stack as-is */
+            break;              /* otherwise fall through to kill+relaunch */
+        case RELOAD_NO_PORT:
+        default:
+            break;              /* older stack: silent kill+relaunch */
+        }
+    }
 
     /* Shutdown */
     if (IsStackRunning())
@@ -1012,6 +1109,7 @@ enum ErrorCode SaveNetworkPrefs()
     if (!WriteMobilePrefs(MOBILEBB_PATH_ENVARC)) return NOT_SAVED_PREFS_ENVARC;
     if (!WriteServers(SERVER_PATH_STORAGE, PREFS_PATH_ENVARC))
         return NOT_SAVED_PREFS_ENVARC;
+    WriteNetServices(PREFS_PATH_ENVARC);
 
     return UseNetworkPrefs();
 }
@@ -1025,6 +1123,7 @@ enum ErrorCode UseNetworkPrefs()
     if (!RecursiveCreateDir(SERVER_PATH_ENV)) return NOT_SAVED_PREFS_ENV;
     if (!WriteServers(SERVER_PATH_ENV, PREFS_PATH_ENV))
         return NOT_SAVED_PREFS_ENV;
+    WriteNetServices(PREFS_PATH_ENV);
 
     if (StopWireless())
         if (GetWirelessDevice() != NULL)
@@ -1384,6 +1483,166 @@ void ReadMobilePrefs(CONST_STRPTR directory)
 }
 
 
+/* ------------------------------------------------------------------------
+ * Managed network services (db/services.d/<name>) - the Services tab.
+ * ------------------------------------------------------------------------ */
+
+struct NetSvcEntry netservices[MAX_NETSERVICES];
+int netserviceCount = 0;
+
+/* Split "KEY = VALUE" in place (trims surrounding whitespace).  FALSE for
+ * blank / comment lines. */
+static BOOL svc_kv(char *line, char **key, char **val)
+{
+    char *p = line, *eq, *e;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0' || *p == '\n' || *p == '\r' || *p == '#' || *p == ';')
+        return FALSE;
+    eq = p;
+    while (*eq && *eq != '=' && *eq != '\n') eq++;
+    if (*eq != '=') return FALSE;
+    *key = p;
+    e = eq; *eq = '\0';
+    while (e > p && (e[-1] == ' ' || e[-1] == '\t')) *--e = '\0';
+    p = eq + 1;
+    while (*p == ' ' || *p == '\t') p++;
+    *val = p;
+    e = p; while (*e && *e != '\n' && *e != '\r') e++;
+    while (e > p && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    *e = '\0';
+    return TRUE;
+}
+
+static BOOL svc_keyeq(const char *k, const char *lit)
+{
+    while (*k && *lit)
+    {
+        char a = *k, b = *lit;
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b) return FALSE;
+        k++; lit++;
+    }
+    return *k == '\0' && *lit == '\0';
+}
+
+static BOOL svc_bool(const char *v)   /* default enabled; false for no/false/0/off */
+{
+    char c = v ? v[0] : 0;
+    if (c == 'n' || c == 'N' || c == 'f' || c == 'F' || c == '0') return FALSE;
+    if ((c == 'o' || c == 'O') && (v[1] == 'f' || v[1] == 'F')) return FALSE;
+    return TRUE;
+}
+
+static void svc_copy(char *dst, ULONG size, const char *src)
+{
+    ULONG i;
+    for (i = 0; i + 1 < size && src[i]; i++) dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+/* Scan the first existing db/services.d/ (ENV: then ENVARC: then install
+ * default) and fill netservices[].  Returns FALSE if none is found. */
+BOOL ReadNetServices(void)
+{
+    static const char * const roots[] = {
+        PREFS_PATH_ENV    "/db/services.d",
+        PREFS_PATH_ENVARC "/db/services.d",
+        "SYS:System/Network/AROSTCP/db/services.d",
+        NULL
+    };
+    BPTR dir = BNULL, old, file;
+    struct FileInfoBlock *fib;
+    int r;
+
+    netserviceCount = 0;
+    for (r = 0; roots[r] != NULL && dir == BNULL; r++)
+        dir = Lock((STRPTR)roots[r], SHARED_LOCK);
+    if (dir == BNULL)
+        return FALSE;
+
+    fib = AllocDosObject(DOS_FIB, NULL);
+    if (fib == NULL) { UnLock(dir); return FALSE; }
+
+    old = CurrentDir(dir);
+    if (Examine(dir, fib))
+    {
+        while (ExNext(dir, fib) && netserviceCount < MAX_NETSERVICES)
+        {
+            struct NetSvcEntry *e;
+            char line[256], *key, *val;
+
+            if (fib->fib_DirEntryType > 0) continue;        /* skip subdirs */
+            if (fib->fib_FileName[0] == '.') continue;
+            file = Open(fib->fib_FileName, MODE_OLDFILE);
+            if (file == BNULL) continue;
+
+            e = &netservices[netserviceCount];
+            svc_copy(e->nse_Name, sizeof(e->nse_Name), fib->fib_FileName);
+            e->nse_Path[0] = e->nse_Order[0] = e->nse_StopSig[0] = e->nse_Policy[0] = '\0';
+            e->nse_Enabled = TRUE;
+            while (FGets(file, (STRPTR)line, sizeof(line)))
+            {
+                if (!svc_kv(line, &key, &val)) continue;
+                if (svc_keyeq(key, "Path"))         svc_copy(e->nse_Path, sizeof(e->nse_Path), val);
+                else if (svc_keyeq(key, "Order"))   svc_copy(e->nse_Order, sizeof(e->nse_Order), val);
+                else if (svc_keyeq(key, "StopSig")) svc_copy(e->nse_StopSig, sizeof(e->nse_StopSig), val);
+                else if (svc_keyeq(key, "Policy"))  svc_copy(e->nse_Policy, sizeof(e->nse_Policy), val);
+                else if (svc_keyeq(key, "Enabled")) e->nse_Enabled = svc_bool(val);
+            }
+            Close(file);
+            if (e->nse_Path[0] != '\0')
+                netserviceCount++;
+        }
+    }
+    CurrentDir(old);
+    FreeDosObject(DOS_FIB, fib);
+    UnLock(dir);
+    return TRUE;
+}
+
+/* Write each service back to <prefspath>/db/services.d/<name> with the
+ * tab's Enabled flag.  Rewrites the file from the parsed fields (the service
+ * manager only reads the key=value settings). */
+BOOL WriteNetServices(CONST_STRPTR prefspath)
+{
+    char dirpath[300];
+    int i;
+    BPTR lock;
+
+    if (netserviceCount == 0)
+        return TRUE;
+
+    snprintf(dirpath, sizeof(dirpath), "%s/db/services.d", prefspath);
+    lock = Lock((STRPTR)dirpath, SHARED_LOCK);
+    if (lock != BNULL)
+        UnLock(lock);
+    else if (!RecursiveCreateDir(dirpath))
+        return FALSE;
+
+    for (i = 0; i < netserviceCount; i++)
+    {
+        struct NetSvcEntry *e = &netservices[i];
+        char path[400];
+        BPTR fh;
+
+        snprintf(path, sizeof(path), "%s/%s", dirpath, e->nse_Name);
+        fh = Open((STRPTR)path, MODE_NEWFILE);
+        if (fh == BNULL)
+            continue;
+        FPuts(fh, (STRPTR)"# AROSTCP network service (managed by Network prefs)\n");
+        if (e->nse_Path[0])    { FPuts(fh, (STRPTR)"Path=");    FPuts(fh, (STRPTR)e->nse_Path);    FPutC(fh, '\n'); }
+        if (e->nse_Order[0])   { FPuts(fh, (STRPTR)"Order=");   FPuts(fh, (STRPTR)e->nse_Order);   FPutC(fh, '\n'); }
+        if (e->nse_StopSig[0]) { FPuts(fh, (STRPTR)"StopSig="); FPuts(fh, (STRPTR)e->nse_StopSig); FPutC(fh, '\n'); }
+        if (e->nse_Policy[0])  { FPuts(fh, (STRPTR)"Policy=");  FPuts(fh, (STRPTR)e->nse_Policy);  FPutC(fh, '\n'); }
+        FPuts(fh, (STRPTR)(e->nse_Enabled ? "Enabled=yes\n" : "Enabled=no\n"));
+        Close(fh);
+    }
+    return TRUE;
+}
+
+
 BOOL ReadServers()
 {
     BPTR dir, file;
@@ -1664,6 +1923,7 @@ void InitNetworkPrefs(CONST_STRPTR directory, BOOL use, BOOL save)
     ReadWirelessPrefs(WIRELESS_PATH_ENV);
     ReadMobilePrefs(MOBILEBB_PATH_ENV);
     ReadServers();
+    ReadNetServices();
 
     if (save)
     {

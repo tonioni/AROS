@@ -246,7 +246,7 @@ arptimer()
 {
     struct sana_softc *ssc;
     register struct arptable *atab;
-    register struct arptab *at;
+    register struct arptab *at, *next;
     register int i;
 
     for(ssc = ssq; ssc; ssc = ssc->ss_next) {
@@ -256,9 +256,10 @@ arptimer()
         ARPTAB_LOCK(atab);
 
         for(i = 0; i < ARPTAB_HSIZE; i++) {
+            /* next is taken first: arptfree() moves at onto the free list */
             for(at = (struct arptab *)atab->atb_entries[i].mlh_Head;
-                    at->at_succ;
-                    at = at->at_succ) {
+                    (next = at->at_succ) != NULL;
+                    at = next) {
                 if(at->at_flags == 0 || (at->at_flags & ATF_PERM))
                     continue;
                 if(++at->at_timer < ((at->at_flags & ATF_COM) ?
@@ -897,8 +898,24 @@ out:
     return;
 }
 
+static int arpioctl_locked(int cmd, caddr_t data);
+
+/*
+ * The daemon takes spl before ARPTAB_LOCK, and arptfree() frees at splimp,
+ * so the ioctls must hold spl first too or the two orders deadlock.
+ */
 int
-arpioctl(cmd, data)
+arpioctl(int cmd, caddr_t data)
+{
+    spl_t s = splimp();
+    int error = arpioctl_locked(cmd, data);
+
+    splx(s);
+    return (error);
+}
+
+static int
+arpioctl_locked(cmd, data)
 int cmd;
 caddr_t data;
 {

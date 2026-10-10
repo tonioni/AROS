@@ -38,8 +38,7 @@
 #include <aros/libcall.h>
 #include "netprefs_intern.h"
 
-static CONST_STRPTR NetworkTabs[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL};
-static CONST_STRPTR DHCPCycle[] = { NULL, NULL, NULL, NULL };
+static CONST_STRPTR NetworkTabs[] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
 static CONST_STRPTR EncCycle[] = { NULL, NULL, NULL, NULL };
 static CONST_STRPTR KeyCycle[] = { NULL, NULL, NULL };
 static CONST_STRPTR ServiceTypeCycle[] = { NULL, NULL };
@@ -86,14 +85,13 @@ static struct Hook  wireless_displayHook,
 static struct Hook  server_displayHook,
                     server_constructHook,
                     server_destructHook;
+static struct Hook  service_displayHook;
 
 /*** Instance Data **********************************************************/
 struct NetPEditor_DATA
 {
     // Main window
     Object  *netped_interfaceList,
-            *netped_DHCPState,
-            *netped_DNSString[2],
             *netped_hostString,
             *netped_domainString,
             *netped_Autostart,
@@ -118,6 +116,9 @@ struct NetPEditor_DATA
             *netped_serverAddButton,
             *netped_serverEditButton,
             *netped_serverRemoveButton,
+            *netped_serviceList,
+            *netped_svcEnabled,
+            *netped_svcPath,
             *netped_mainTabs;
 
     // Interface window
@@ -471,6 +472,31 @@ AROS_UFHA(struct Server *, entry, A1))
     AROS_USERFUNC_EXIT
 }
 
+/* Services tab: name, enabled, program. List entries point into netservices[]. */
+AROS_UFH3S(LONG, serviceDisplayFunc,
+AROS_UFHA(struct Hook *, hook, A0),
+AROS_UFHA(char **, array, A2),
+AROS_UFHA(struct NetSvcEntry *, entry, A1))
+{
+    AROS_USERFUNC_INIT
+    if (entry)
+    {
+        *array++ = entry->nse_Name;
+        *array++ = entry->nse_Enabled ? (STRPTR)_(MSG_SVC_YES) : (STRPTR)_(MSG_SVC_NO);
+        *array++ = entry->nse_Path;
+    }
+    else
+    {
+        *array++ = (STRPTR)_(MSG_SVC_COL_NAME);
+        *array++ = (STRPTR)_(MSG_SVC_COL_ENABLED);
+        *array++ = (STRPTR)_(MSG_SVC_PATH);
+    }
+
+    return 0;
+
+    AROS_USERFUNC_EXIT
+}
+
 /* ------------------------------------------------------------------------
  * Protocol-address working-slot helpers.
  *
@@ -488,7 +514,9 @@ static BOOL proto_present(struct ProtocolAddress *pa)
 {
     return pa->pa_mode == IP_MODE_DHCP ||
            pa->pa_mode == IP_MODE_AUTO ||
-           pa->pa_addr[0] != '\0';
+           pa->pa_addr[0] != '\0' ||
+           pa->pa_dns[0][0] != '\0' ||
+           pa->pa_dns[1][0] != '\0';
 }
 
 /* Load a working slot from the interface's node for this plugin id (or leave
@@ -502,7 +530,12 @@ static void proto_slot_load(struct ProtocolAddress *slot,
     memset(slot, 0, sizeof(*slot));
     slot->pa_node.ln_Type = id;
     slot->pa_family       = fam;
-    slot->pa_mode         = IP_MODE_MANUAL;
+    /* Default an un-configured protocol slot to the usual automatic mode for
+     * its family - DHCP for IPv4, stateless autoconfiguration for IPv6 - so a
+     * newly added interface comes up automatic rather than Manual.  An
+     * existing node (below) overrides this with the saved mode. */
+    slot->pa_mode         = (fam == PROTO_FAMILY_IPV6) ? IP_MODE_AUTO
+                                                       : IP_MODE_DHCP;
 
     if (pa)
     {
@@ -584,18 +617,12 @@ BOOL Gadgets2NetworkPrefs(struct NetPEditor_DATA *data)
     }
     SetInterfaceCount(entries);
 
-    GET(data->netped_DNSString[0], MUIA_String_Contents, &str);
-    SetDNS(0, str);
-    GET(data->netped_DNSString[1], MUIA_String_Contents, &str);
-    SetDNS(1, str);
     GET(data->netped_hostString, MUIA_String_Contents, &str);
     SetHostname(str);
     GET(data->netped_domainString, MUIA_String_Contents, &str);
     SetDomain(str);
     GET(data->netped_Autostart, MUIA_Selected, &lng);
     SetAutostart(lng);
-    GET(data->netped_DHCPState, MUIA_Cycle_Active, &lng);
-    SetDHCP(lng);
 
     entries = XGET(data->netped_hostList, MUIA_List_Entries);
     for(i = 0; i < entries; i++)
@@ -670,6 +697,18 @@ BOOL Gadgets2NetworkPrefs(struct NetPEditor_DATA *data)
     return TRUE;
 }
 
+/* Services tab: reflect the active list entry in the Enabled checkmark + path. */
+static void ShowSelectedService(struct NetPEditor_DATA *data)
+{
+    struct NetSvcEntry *e = NULL;
+
+    DoMethod(data->netped_serviceList, MUIM_List_GetEntry,
+             MUIV_List_GetEntry_Active, (IPTR)&e);
+    NNSET(data->netped_svcEnabled, MUIA_Selected, e ? e->nse_Enabled : FALSE);
+    SET(data->netped_svcEnabled, MUIA_Disabled, e == NULL);
+    SET(data->netped_svcPath, MUIA_Text_Contents, (IPTR)(e ? e->nse_Path : ""));
+}
+
 BOOL NetworkPrefs2Gadgets
 (
     struct NetPEditor_DATA *data
@@ -697,12 +736,9 @@ BOOL NetworkPrefs2Gadgets
 
     SET(data->netped_interfaceList, MUIA_List_Quiet, FALSE);
 
-    NNSET(data->netped_DNSString[0], MUIA_String_Contents, (IPTR)GetDNS(0));
-    NNSET(data->netped_DNSString[1], MUIA_String_Contents, (IPTR)GetDNS(1));
     NNSET(data->netped_hostString, MUIA_String_Contents, (IPTR)GetHostname());
     NNSET(data->netped_domainString, MUIA_String_Contents, (IPTR)GetDomain());
     NNSET(data->netped_Autostart, MUIA_Selected, (IPTR)GetAutostart());
-    NNSET(data->netped_DHCPState, MUIA_Cycle_Active, (IPTR)GetDHCP() ? 1 : 0);
 
     entries = GetHostCount();
 
@@ -798,6 +834,17 @@ BOOL NetworkPrefs2Gadgets
     }
 
     SET(data->netped_serverList, MUIA_List_Quiet, FALSE);
+
+    /* Services tab */
+    SET(data->netped_serviceList, MUIA_List_Quiet, TRUE);
+    DoMethod(data->netped_serviceList, MUIM_List_Clear);
+    for (i = 0; i < netserviceCount; i++)
+        DoMethod(data->netped_serviceList, MUIM_List_InsertSingle,
+                 (IPTR)&netservices[i], MUIV_List_Insert_Bottom);
+    SET(data->netped_serviceList, MUIA_List_Quiet, FALSE);
+    SET(data->netped_serviceList, MUIA_List_Active,
+        netserviceCount ? 0 : MUIV_List_Active_Off);
+    ShowSelectedService(data);
 
     return TRUE;
 }
@@ -970,14 +1017,15 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
         return NULL;
 
     // main window
-    Object  *DNSString[2], *hostString, *domainString,
-            *autostart, *interfaceList, *DHCPState,
+    Object  *hostString, *domainString,
+            *autostart, *interfaceList,
             *addInterface, *editButton, *removeButton, *inputGroup,
             *hostList, *hostAddButton, *hostEditButton, *hostRemoveButton,
             *networkList, *netAddButton, *netEditButton, *netRemoveButton,
             *serverList, *serverAddButton, *serverEditButton, *serverRemoveButton,
             *MBBInitString[MAXATCOMMANDS], *MBBDeviceString, *MBBUnit,
-            *MBBUsername, *MBBPassword, *tetheringAddButton, *mainTabs;
+            *MBBUsername, *MBBPassword, *tetheringAddButton, *mainTabs,
+            *serviceList, *svcEnabled, *svcPath;
 
     // inferface window
     Object  *deviceString, *protoAddrList, *protoEditButton,
@@ -1002,9 +1050,6 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
             *serverService, *serverUser, *serverGroup, *serverPass,
             *serverApplyButton, *serverCloseButton;
 
-    DHCPCycle[0] = _(MSG_IP_MODE_DHCP);
-    DHCPCycle[1] = _(MSG_IP_MODE_AUTO);
-    DHCPCycle[2] = _(MSG_IP_MODE_MANUAL);
 
     EncCycle[0] = _(MSG_ENC_NONE);
     EncCycle[1] = _(MSG_ENC_WEP);
@@ -1021,6 +1066,7 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
     NetworkTabs[3] = _(MSG_TAB_TETHERING);
     NetworkTabs[4] = _(MSG_TAB_MOBILE);
     NetworkTabs[5] = _(MSG_TAB_SERVERS);
+    NetworkTabs[6] = _(MSG_TAB_SERVICES);
 
     netpeditor_constructHook.h_Entry = (HOOKFUNC)constructFunc;
     netpeditor_destructHook.h_Entry = (HOOKFUNC)destructFunc;
@@ -1037,6 +1083,7 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
     server_constructHook.h_Entry = (HOOKFUNC)serverConstructFunc;
     server_destructHook.h_Entry = (HOOKFUNC)serverDestructFunc;
     server_displayHook.h_Entry = (HOOKFUNC)serverDisplayFunc;
+    service_displayHook.h_Entry = (HOOKFUNC)serviceDisplayFunc;
 
     self = (Object *)DoSuperNewTags
     (
@@ -1072,39 +1119,19 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
                         Child, (IPTR)HVSpace,
                     End),
                 End),
-                Child, (IPTR)(inputGroup = (Object *)ColGroup(4),
+                Child, (IPTR)(inputGroup = (Object *)ColGroup(2),
                     GroupFrame,
-                    Child, (IPTR)Label2(__(MSG_IP_MODE)),
-                    Child, (IPTR)(DHCPState = (Object *)CycleObject,
-                        MUIA_Cycle_Entries, (IPTR)DHCPCycle,
-                    End),
-                    Child, (IPTR)HVSpace,
-                    Child, (IPTR)HVSpace,
                     Child, (IPTR)Label2(__(MSG_HOST_NAME)),
                     Child, (IPTR)(hostString = (Object *)StringObject,
                         StringFrame,
                         MUIA_String_Accept, (IPTR)NAMECHARS,
                         MUIA_CycleChain, 1,
                     End),
-                    Child, (IPTR)Label2(__(MSG_DNS1)),
-                    Child, (IPTR)(DNSString[0] = (Object *)StringObject,
-                        StringFrame,
-                        MUIA_String_Accept, (IPTR)IPCHARS,
-                        MUIA_CycleChain, 1,
-                        MUIA_FixWidthTxt, (IPTR)max_ip_str,
-                    End),
                     Child, (IPTR)Label2(__(MSG_DOMAIN_NAME)),
                     Child, (IPTR)(domainString = (Object *)StringObject,
                         StringFrame,
                         MUIA_String_Accept, (IPTR)NAMECHARS,
                         MUIA_CycleChain, 1,
-                    End),
-                    Child, (IPTR)Label2(__(MSG_DNS2)),
-                    Child, (IPTR)(DNSString[1] = (Object *)StringObject,
-                        StringFrame,
-                        MUIA_String_Accept, (IPTR)IPCHARS,
-                        MUIA_CycleChain, 1,
-                        MUIA_FixWidthTxt, (IPTR)max_ip_str,
                     End),
                 End),
                 Child, (IPTR)ColGroup(2),
@@ -1262,6 +1289,33 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
                         Child, (IPTR)HVSpace,
                     End),
                 End),
+            End,
+
+            /* Services tab: enable/disable the stack's managed network services */
+            Child, (IPTR)VGroup,
+                Child, (IPTR)(TextObject,
+                    MUIA_Text_Contents, (IPTR)_(MSG_SVC_DESC),
+                End),
+                Child, (IPTR)ListviewObject,
+                    MUIA_Listview_List, (IPTR)(serviceList = (Object *)ListObject,
+                        ReadListFrame,
+                        MUIA_List_Title, TRUE,
+                        MUIA_List_Format, (IPTR)"BAR,P=\33c BAR,BAR,",
+                        MUIA_List_DisplayHook, (IPTR)&service_displayHook,
+                    End),
+                End,
+                Child, (IPTR)ColGroup(2),
+                    GroupFrameT(_(MSG_SVC_GROUP)),
+                    Child, (IPTR)Label1(_(MSG_SVC_ENABLED)),
+                    Child, (IPTR)(HGroup,
+                        Child, (IPTR)(svcEnabled = MUI_MakeObject(MUIO_Checkmark, NULL)),
+                        Child, (IPTR)HVSpace,
+                    End),
+                    Child, (IPTR)Label2(_(MSG_SVC_PATH)),
+                    Child, (IPTR)(svcPath = (Object *)TextObject,
+                        MUIA_Text_Contents, (IPTR)"",
+                    End),
+                End,
             End,
 
         End, // register
@@ -1636,9 +1690,6 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
 
         // main window
         data->netped_mainTabs = mainTabs;
-        data->netped_DHCPState = DHCPState;
-        data->netped_DNSString[0] = DNSString[0];
-        data->netped_DNSString[1] = DNSString[1];
         data->netped_hostString = hostString;
         data->netped_domainString = domainString;
         data->netped_Autostart = autostart;
@@ -1655,6 +1706,10 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
         data->netped_netAddButton = netAddButton;
         data->netped_netEditButton = netEditButton;
         data->netped_netRemoveButton = netRemoveButton;
+        data->netped_serviceList = serviceList;
+        data->netped_svcEnabled = svcEnabled;
+        data->netped_svcPath = svcPath;
+        set(svcEnabled, MUIA_CycleChain, 1);
         data->netped_serverList = serverList;
         data->netped_serverAddButton = serverAddButton;
         data->netped_serverEditButton = serverEditButton;
@@ -1761,16 +1816,6 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
 
         DoMethod
         (
-            DNSString[0], MUIM_Notify, MUIA_String_Acknowledge, MUIV_EveryTime,
-            (IPTR)self, 3, MUIM_Set, MUIA_PrefsEditor_Changed, TRUE
-        );
-        DoMethod
-        (
-            DNSString[1], MUIM_Notify, MUIA_String_Acknowledge, MUIV_EveryTime,
-            (IPTR)self, 3, MUIM_Set, MUIA_PrefsEditor_Changed, TRUE
-        );
-        DoMethod
-        (
             hostString, MUIM_Notify, MUIA_String_Acknowledge, MUIV_EveryTime,
             (IPTR)self, 3, MUIM_Set, MUIA_PrefsEditor_Changed, TRUE
         );
@@ -1783,11 +1828,6 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
         (
             autostart, MUIM_Notify, MUIA_Selected, MUIV_EveryTime,
             (IPTR)self, 3, MUIM_Set, MUIA_PrefsEditor_Changed, TRUE
-        );
-        DoMethod
-        (
-            DHCPState, MUIM_Notify, MUIA_Cycle_Active, MUIV_EveryTime,
-            (IPTR)self, 2, MUIM_NetPEditor_IPModeChanged, FALSE
         );
 
         DoMethod
@@ -1915,6 +1955,18 @@ Object * NetPEditor__OM_NEW(Class *CLASS, Object *self, struct opSet *message)
         (
             serverList, MUIM_Notify, MUIA_Listview_DoubleClick, MUIV_EveryTime,
             (IPTR)self, 3, MUIM_NetPEditor_EditServerEntry, FALSE
+        );
+
+        /* Services tab */
+        DoMethod
+        (
+            serviceList, MUIM_Notify, MUIA_List_Active, MUIV_EveryTime,
+            (IPTR)self, 1, MUIM_NetPEditor_ShowServiceEntry
+        );
+        DoMethod
+        (
+            svcEnabled, MUIM_Notify, MUIA_Selected, MUIV_EveryTime,
+            (IPTR)self, 1, MUIM_NetPEditor_ToggleService
         );
 
         DoMethod
@@ -2057,7 +2109,6 @@ IPTR NetPEditor__MUIM_Setup
 
     /* Fill the gadgets from the loaded configuration. */
     NetworkPrefs2Gadgets(data);
-    DoMethod(self, MUIM_NetPEditor_IPModeChanged, FALSE);
     SET(self, MUIA_PrefsEditor_Changed, FALSE);
 
     return TRUE;
@@ -2179,8 +2230,6 @@ IPTR NetPEditor__MUIM_PrefsEditor_ImportFH
 
     NetworkPrefs2Gadgets(data);
 
-    DoMethod(self, MUIM_NetPEditor_IPModeChanged, FALSE);
-
     return success;
 }
 
@@ -2193,45 +2242,6 @@ IPTR NetPEditor__MUIM_PrefsEditor_ExportFH
     return TRUE;
 }
 
-/* Global DHCP mode changed — enable/disable DNS gadgets */
-IPTR NetPEditor__MUIM_NetPEditor_IPModeChanged
-(
-    Class *CLASS, Object *self,
-    struct MUIP_NetPEditor_IPModeChanged *message
-)
-{
-    struct NetPEditor_DATA *data = INST_DATA(CLASS, self);
-    STRPTR str = NULL;
-    IPTR lng = 0;
-
-    /* message->interface is now always FALSE; the per-protocol mode
-     * changes are handled internally by Net4WinClass / Net6WinClass */
-    GetAttr(MUIA_Cycle_Active, data->netped_DHCPState, &lng);
-
-    if (lng == 1)
-    {
-        /* DHCP: DNS is supplied automatically */
-        SET(data->netped_DNSString[0], MUIA_Disabled, TRUE);
-        GET(data->netped_DNSString[0], MUIA_String_Contents, &str);
-        SetDNS(0, str);
-        SET(data->netped_DNSString[0], MUIA_String_Contents, "");
-
-        SET(data->netped_DNSString[1], MUIA_Disabled, TRUE);
-        GET(data->netped_DNSString[1], MUIA_String_Contents, &str);
-        SetDNS(1, str);
-        SET(data->netped_DNSString[1], MUIA_String_Contents, "");
-    }
-    else
-    {
-        SET(data->netped_DNSString[0], MUIA_Disabled, FALSE);
-        SET(data->netped_DNSString[0], MUIA_String_Contents, GetDNS(0));
-        SET(data->netped_DNSString[1], MUIA_Disabled, FALSE);
-        SET(data->netped_DNSString[1], MUIA_String_Contents, GetDNS(1));
-    }
-
-    SET(self, MUIA_PrefsEditor_Changed, TRUE);
-    return TRUE;
-}
 
 /* IPv4 mode cycle changed inside the IPv4 config sub-window */
 /* (removed - mode changes are now handled internally by Net4WinClass) */
@@ -2957,8 +2967,39 @@ IPTR NetPEditor__MUIM_NetPEditor_AddTetheringEntry
 
     return 0;
 }
+/* Services tab: list selection changed -> reflect it in the Enabled checkmark */
+IPTR NetPEditor__MUIM_NetPEditor_ShowServiceEntry
+(
+    Class *CLASS, Object *self, Msg message
+)
+{
+    struct NetPEditor_DATA *data = INST_DATA(CLASS, self);
+
+    ShowSelectedService(data);
+    return 0;
+}
+
+/* Services tab: Enabled checkmark toggled -> update the active service entry */
+IPTR NetPEditor__MUIM_NetPEditor_ToggleService
+(
+    Class *CLASS, Object *self, Msg message
+)
+{
+    struct NetPEditor_DATA *data = INST_DATA(CLASS, self);
+    struct NetSvcEntry *e = NULL;
+
+    DoMethod(data->netped_serviceList, MUIM_List_GetEntry,
+             MUIV_List_GetEntry_Active, (IPTR)&e);
+    if (e == NULL)
+        return 0;
+    e->nse_Enabled = XGET(data->netped_svcEnabled, MUIA_Selected) ? TRUE : FALSE;
+    DoMethod(data->netped_serviceList, MUIM_List_Redraw, MUIV_List_Redraw_Active);
+    SET(self, MUIA_PrefsEditor_Changed, TRUE);
+    return 0;
+}
+
 /*** Setup ******************************************************************/
-ZUNE_CUSTOMCLASS_26
+ZUNE_CUSTOMCLASS_27
 (
     NetPEditor, NULL, MUIC_PrefsEditor, NULL,
     OM_NEW,                               struct opSet *,
@@ -2968,7 +3009,6 @@ ZUNE_CUSTOMCLASS_26
     MUIM_PrefsEditor_ExportFH,            struct MUIP_PrefsEditor_ExportFH *,
     MUIM_PrefsEditor_Save,                Msg,
     MUIM_PrefsEditor_Use,                 Msg,
-    MUIM_NetPEditor_IPModeChanged,        struct MUIP_NetPEditor_IPModeChanged *,
     MUIM_NetPEditor_ShowEntry,            Msg,
     MUIM_NetPEditor_EditEntry,            struct MUIP_NetPEditor_EditEntry *,
     MUIM_NetPEditor_ApplyEntry,           Msg,
@@ -2986,5 +3026,7 @@ ZUNE_CUSTOMCLASS_26
     MUIM_NetPEditor_ApplyProtoEntry,      struct MUIP_NetPEditor_ApplyProtoEntry *,
     MUIM_NetPEditor_AddConnection,        struct MUIP_NetPEditor_AddConnection *,
     MUIM_NetPEditor_EditTunnelEntry,      struct MUIP_NetPEditor_EditTunnelEntry *,
-    MUIM_NetPEditor_ApplyTunnelEntry,     Msg
+    MUIM_NetPEditor_ApplyTunnelEntry,     Msg,
+    MUIM_NetPEditor_ShowServiceEntry,     Msg,
+    MUIM_NetPEditor_ToggleService,        Msg
 );

@@ -18,7 +18,7 @@ extern struct MUI_CustomClass *NetPEditor_CLASS;
 /*** Macros *****************************************************************/
 #define NetPEditorObject BOOPSIOBJMACRO_START(NetPEditor_CLASS->mcc_Class)
 
-#define MUIM_NetPEditor_IPModeChanged   (MUIB_NetPEditor | 0x00000001)
+/* 0x00000001 was MUIM_NetPEditor_IPModeChanged (removed; mode is now per-protocol) */
 #define MUIM_NetPEditor_ShowEntry       (MUIB_NetPEditor | 0x00000002)
 #define MUIM_NetPEditor_EditEntry       (MUIB_NetPEditor | 0x00000003)
 #define MUIM_NetPEditor_ApplyEntry      (MUIB_NetPEditor | 0x00000004)
@@ -41,12 +41,13 @@ extern struct MUI_CustomClass *NetPEditor_CLASS;
 #define MUIM_NetPEditor_AddConnection    (MUIB_NetPEditor | 0x00000012)
 #define MUIM_NetPEditor_EditTunnelEntry  (MUIB_NetPEditor | 0x00000013)
 #define MUIM_NetPEditor_ApplyTunnelEntry (MUIB_NetPEditor | 0x00000014)
+#define MUIM_NetPEditor_ShowServiceEntry (MUIB_NetPEditor | 0x00000015)
+#define MUIM_NetPEditor_ToggleService    (MUIB_NetPEditor | 0x00000016)
 
 struct MUIP_NetPEditor_EditEntry    {STACKED ULONG MethodID; STACKED ULONG addEntry;};
 struct MUIP_NetPEditor_AddConnection {STACKED ULONG MethodID; STACKED LONG type;};
 struct MUIP_NetPEditor_EditTunnelEntry {STACKED ULONG MethodID; STACKED ULONG addEntry;};
 struct MUIP_NetPEditor_EditNetEntry {STACKED ULONG MethodID; STACKED ULONG addEntry;};
-struct MUIP_NetPEditor_IPModeChanged {STACKED ULONG MethodID; STACKED ULONG interface;};
 struct MUIP_NetPEditor_ApplyProtoEntry {STACKED ULONG MethodID; STACKED ULONG family;};
 
 #endif /* _NETPEDITOR_H_ */

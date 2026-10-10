@@ -52,6 +52,11 @@
 #include <netinet/in_var.h>
 #include <netinet6/in6_var.h>
 #include <protos/net/if_protos.h>
+
+/* in-place reload: dropped-interface tracking (net/if_sana.c) */
+extern void sana_reload_begin(void);
+extern void sana_mark_seen(struct ifnet *ifp);
+extern void sana_remove_unseen(void);
 #include <protos/net/route_protos.h>
 
 extern struct ifnet *iface_make(struct ssconfig *ifc);
@@ -529,6 +534,109 @@ static BOOL defer_remember(const char *name, const char *line, ULONG length)
 }
 
 /*
+ * Per-interface DNS servers.
+ *
+ * The DNS=/DNS6= tokens on an interface line give that interface's DNS
+ * servers.  They are registered as dynamic nameservers tagged with the owning
+ * interface (nsn_Owner), so the resolver picks them up (res_init merges
+ * DynDB.dyn_NameServers) and they can be dropped again when the interface goes
+ * away.  A server may be given as an IPv4 or an IPv6 literal (either token may
+ * carry either family); the node is tagged with nsn_Family accordingly.
+ */
+static void ifdns_remove_locked(struct ifnet *ifp)
+{
+    struct MinNode *node, *next;
+
+    for(node = DynDB.dyn_NameServers.mlh_Head; node->mln_Succ; node = next) {
+        next = node->mln_Succ;
+        if(((struct NameserventNode *)node)->nsn_Owner == ifp) {
+            Remove((struct Node *)node);
+            bsd_free(node, M_NETDB);
+        }
+    }
+}
+
+static int ifdns_add_csv_locked(struct ifnet *ifp, const UBYTE *csv)
+{
+    const UBYTE *p = csv;
+    char buf[64];       /* one server address string (IPv4 or IPv6 literal) */
+    int added = 0;
+
+    while(p && *p) {
+        /* Bound the scan to the buffer: strnlen() never over-reads past a
+         * missing terminator, and a token that does not fit is skipped. */
+        size_t avail = strnlen((const char *)p, sizeof(buf));
+        const UBYTE *comma = (const UBYTE *)memchr(p, ',', avail);
+        size_t n = comma ? (size_t)(comma - p) : avail;
+        struct sockaddr_in sin;
+        struct in6_addr in6;
+
+        if(n > 0 && n < sizeof(buf)) {
+            struct NameserventNode *nsn = NULL;
+
+            memcpy(buf, p, n);
+            buf[n] = '\0';
+            memset(&sin, 0, sizeof(sin));
+            if(setaddr(&sin, buf, AF_INET)) {
+                /* IPv4 server */
+                if((nsn = bsd_malloc(sizeof(*nsn), M_NETDB, M_WAITOK)) != NULL) {
+                    nsn->nsn_EntSize = sizeof(nsn->nsn_Ent);
+                    nsn->nsn_Family = AF_INET;
+                    nsn->nsn_Ent.ns_addr.s_addr = sin.sin_addr.s_addr;
+                }
+            } else if(inet6_aton(buf, &in6)) {
+                /* IPv6 server */
+                if((nsn = bsd_malloc(sizeof(*nsn), M_NETDB, M_WAITOK)) != NULL) {
+                    nsn->nsn_EntSize = sizeof(nsn->nsn_Ent);
+                    nsn->nsn_Family = AF_INET6;
+                    nsn->nsn_Ent.ns_addr.s_addr = 0;
+                    nsn->nsn_Addr6 = in6;
+                }
+            }
+            if(nsn) {
+                nsn->nsn_Owner = ifp;
+                AddTail((struct List *)&DynDB.dyn_NameServers,
+                        (struct Node *)nsn);
+                added++;
+            }
+        }
+        /* Advance past this token; the comma offset is within the bounded
+         * region, so there is no unterminated-string read here either. */
+        p = (comma && comma[1]) ? comma + 1 : NULL;
+    }
+    return added;
+}
+
+/* Replace interface ifp's per-interface DNS servers with those in the two
+ * comma-separated lists (either may be NULL/empty). */
+void ifnet_set_dns(struct ifnet *ifp, const UBYTE *v4csv, const UBYTE *v6csv)
+{
+    int added = 0;
+
+    ObtainSemaphore(&DynDB.dyn_Lock);
+    ifdns_remove_locked(ifp);
+    if(v4csv && *v4csv)
+        added += ifdns_add_csv_locked(ifp, v4csv);
+    if(v6csv && *v6csv)
+        added += ifdns_add_csv_locked(ifp, v6csv);
+    ReleaseSemaphore(&DynDB.dyn_Lock);
+    ndb_Serial++;       /* make the resolver refresh its nameserver list */
+
+    if(added > 0)
+        __log(LOG_NOTICE, "%s%d: registered %d DNS server(s)\n",
+              ifp->if_name, ifp->if_unit, added);
+}
+
+/* Drop all per-interface DNS servers belonging to ifp (interface going down). */
+void ifnet_clear_dns(struct ifnet *ifp)
+{
+    ObtainSemaphore(&DynDB.dyn_Lock);
+    ifdns_remove_locked(ifp);
+    ReleaseSemaphore(&DynDB.dyn_Lock);
+    ndb_Serial++;
+}
+
+/*
  * Parse an interface entry.
  */
 LONG
@@ -742,11 +850,13 @@ addifent(struct NetDataBase *ndb,
                                 ssc->args->a_gw6[0] != '\0') {
                             setaddr6(&in6r.ifra_dstaddr, ssc->args->a_gw6);
                         }
-                        if(in6_control(NULL, SIOCAIFADDR_IN6,
-                                       (caddr_t)&in6r, ifp) != 0) {
-                            __log(LOG_WARNING,
-                                  "addifent: SIOCAIFADDR_IN6 failed "
-                                  "for %s\n", ssc->args->a_name);
+                        {
+                            int e6 = in6_control(NULL, SIOCAIFADDR_IN6,
+                                                 (caddr_t)&in6r, ifp);
+                            if(e6 != 0)
+                                __log(LOG_WARNING,
+                                      "addifent: SIOCAIFADDR_IN6 failed "
+                                      "for %s (err %d)\n", ssc->args->a_name, e6);
                         }
                     } else {
                         __log(LOG_WARNING,
@@ -797,6 +907,13 @@ addifent(struct NetDataBase *ndb,
                 }
             }
 #endif /* INET6 */
+            /* Register this interface's per-protocol DNS servers. */
+            if(ifp && (flags & NETDB_IFF_MODIFYOLD))
+                ifnet_set_dns(ifp, ssc->args->a_dns, ssc->args->a_dns6);
+            /* Mark this interface as present in the (re)read config, so a
+             * reload can disable interfaces that dropped out of it. */
+            if(ifp)
+                sana_mark_seen(ifp);
             ssconfig_free(ssc);
         } else {
             *errstrp = ERR_SYNTAX;
@@ -1160,6 +1277,7 @@ addnameservent(struct NetDataBase *ndb,
         return RETURN_FAIL;
     }
     nsn->nsn_EntSize = sizeof(nsn->nsn_Ent);
+    nsn->nsn_Family = AF_INET;
     nsn->nsn_Ent.ns_addr.s_addr = ns_addr.s_addr;
 
     /* TODO: NicJA - Where does CHECK_POINTER() Come from? */
@@ -1732,6 +1850,93 @@ LONG reset_netdb(struct CSource *cs,
         ndb_Serial++;
     } else {
         free_netdb(newnetdb);
+    }
+
+    return retval;
+}
+
+/*
+ * Flush all DYNAMIC database entries (DHCP/interface-supplied nameservers and
+ * domains).  Used by the resolver service on an in-place reload: the sources
+ * (interfaces, DHCP) repopulate it as they come back up.  Static entries live
+ * in the NDB and are rebuilt separately by netdb_reload().
+ */
+void dyndb_flush(void)
+{
+    struct MinNode *node, *nnode;
+
+#if defined(__AROS__)
+    D(bug("[AROSTCP](amiga_netdb.c) dyndb_flush()\n"));
+#endif
+
+    ObtainSemaphore(&DynDB.dyn_Lock);
+    for(node = DynDB.dyn_NameServers.mlh_Head; node->mln_Succ; node = nnode) {
+        nnode = node->mln_Succ;
+        bsd_free(node, NULL);
+    }
+    NewList((struct List *)&DynDB.dyn_NameServers);
+    for(node = DynDB.dyn_Domains.mlh_Head; node->mln_Succ; node = nnode) {
+        nnode = node->mln_Succ;
+        bsd_free(node, NULL);
+    }
+    NewList((struct List *)&DynDB.dyn_Domains);
+    ReleaseSemaphore(&DynDB.dyn_Lock);
+    ndb_Serial++;
+}
+
+/*
+ * Re-read the configuration database in place for a reload.  Like
+ * reset_netdb(), but reads with NETDB_IFF_ADDNEW so interface lines are
+ * re-applied through addifent() (an existing interface is reconfigured via its
+ * MODIFYOLD path; a new one is created).  The one-time semaphore/DynDB/NDB
+ * setup done by init_netdb() is NOT repeated - only the NDB content is swapped.
+ */
+LONG netdb_reload(void)
+{
+    UBYTE result[REPLYBUFLEN + 1];
+    struct CSource res;
+    UBYTE *errstr = NULL;
+    LONG retval;
+    struct NetDataBase *newndb;
+
+#if defined(__AROS__)
+    D(bug("[AROSTCP](amiga_netdb.c) netdb_reload()\n"));
+#endif
+
+    res.CS_Buffer = result;
+    res.CS_Length = sizeof(result);
+    res.CS_CurChr = 0;
+
+    /* Drop stale deferred-interface retries from the old config before the
+     * new one is read (new DEFER lines re-add themselves via addifent). */
+    defer_forget(NULL);
+
+    if(!(newndb = alloc_netdb(NULL)))
+        return RETURN_FAIL;
+
+    /* Start a new reload generation: addifent marks each interface it sees in
+     * the config below, so sana_remove_unseen() can disable those dropped. */
+    sana_reload_begin();
+
+    /* ADDNEW creates interfaces that appeared in the new config; MODIFYOLD is
+     * also needed so addifent re-applies config to interfaces that still exist
+     * (at boot ADDNEW alone suffices because every interface is new). */
+    retval = read_netdb(newndb, netdbname, &errstr, &res, -1,
+                        NETDB_IFF_ADDNEW | NETDB_IFF_MODIFYOLD);
+    if(retval == RETURN_WARN)
+        retval = RETURN_OK;
+
+    if(retval == RETURN_OK) {
+        setup_accesscontroltable(newndb);
+        LOCK_W_NDB(NDB);
+        free_netdb(NDB);
+        NDB = newndb;
+        UNLOCK_NDB(NDB);
+        ndb_Serial++;
+        /* Disable any interface no longer named in the new config. */
+        sana_remove_unseen();
+    } else {
+        free_netdb(newndb);
     }
 
     return retval;
