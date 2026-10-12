@@ -677,8 +677,31 @@ void pUnlockSem(LIBBASETYPEPTR ps, struct PsdLockSem *pls)
 /* \\\ */
 
 /* /// "psdDebugSemaphores()" */
-AROS_LH0(void, psdDebugSemaphores,
+/****** poseidon.library/psdDebugSemaphores ********************************
+
+    NAME */
+        AROS_LH0(void, psdDebugSemaphores,
+/*  SYNOPSIS */
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 81, psd)
+/*  FUNCTION
+        Record the current Poseidon semaphore-tracking state in the
+        stack's diagnostic message log.
+
+    NOTES
+        The function identifies the calling task, then traverses the
+        tracked semaphore list under Forbid()/Permit(). Each entry is
+        passed to the internal semaphore diagnostic formatter. The output
+        uses the Poseidon error-message mechanism rather than returning
+        data to the caller.
+
+        The report describes internal lock bookkeeping. It is not a
+        synchronization barrier or a deadlock detector with a result code.
+
+    SEE ALSO
+        psdBorrowLocksWait(), psdLockReadPBase(), psdLockWritePBase()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct Task *thistask = FindTask(NULL);
@@ -733,10 +756,49 @@ AROS_LH0(void, psdUnlockPBase,
 /* \\\ */
 
 /* /// "psdBorrowLocksWait()" */
-AROS_LH2(ULONG, psdBorrowLocksWait,
+/****** poseidon.library/psdBorrowLocksWait ********************************
+
+    NAME */
+        AROS_LH2(ULONG, psdBorrowLocksWait,
+/*  SYNOPSIS */
          AROS_LHA(struct Task *, task, A1),
          AROS_LHA(ULONG, signals, D0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 97, psd)
+/*  FUNCTION
+        Wait for task signals while temporarily transferring Poseidon
+        semaphore ownership to another task, then reclaim the locks.
+
+    INPUTS
+        task    - Valid task intended to receive the caller's locks.
+        signals - Signal mask passed to Exec Wait().
+
+    RESULT
+        Signal bits returned by Wait().
+
+    NOTES
+        The function examines Poseidon's tracked exclusive and shared
+        locks under Forbid(). If the caller holds none, it calls Wait()
+        directly. Otherwise it creates temporary transfer and reclaim
+        lists. Where the destination task already waits for a lock, the
+        function may release the caller's ownership and wake that task.
+        Other held locks can be assigned to the destination task while
+        the caller waits.
+
+        After Wait(), the function restores ownership when possible and
+        reacquires locks whose state changed during the wait. Reacquiring
+        may itself block. The mechanism applies only to locks represented
+        in Poseidon's semaphore-tracking list.
+
+    BUGS
+        The destination task is dereferenced without validation. Internal
+        pooled allocation failures can prevent individual transfers; no
+        allocation or reclaim status is returned separately from signals.
+
+    SEE ALSO
+        psdDebugSemaphores(), psdLockReadPBase(), psdUnlockPBase()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct Task *thistask = FindTask(NULL);
@@ -1031,10 +1093,40 @@ AROS_UFH2(void, pPutChar,
 /* \\\ */
 
 /* /// "psdCopyStrFmtA()" */
-AROS_LH2(STRPTR, psdCopyStrFmtA,
+/****** poseidon.library/psdCopyStrFmtA ************************************
+
+    NAME */
+        AROS_LH2(STRPTR, psdCopyStrFmtA,
+/*  SYNOPSIS */
          AROS_LHA(CONST_STRPTR, fmtstr, A0),
          AROS_LHA(RAWARG, fmtdata, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 68, psd)
+/*  FUNCTION
+        Allocate a string and format it with RawDoFmt() using a caller-supplied
+        argument stream.
+
+    INPUTS
+        fmtstr  - Valid RawDoFmt() format string.
+        fmtdata - RawDoFmt() argument stream matching fmtstr.
+
+    RESULT
+        Newly allocated, NUL-terminated string, or NULL if allocation fails.
+        Release the returned string with psdFreeVec().
+
+    NOTES
+        RawDoFmt() first measures the formatted length. The function then
+        allocates length plus one byte and calls psdSafeRawDoFmtA() to fill
+        the buffer. Neither the format nor its argument stream is copied.
+
+    BUGS
+        The input pointers are not validated. Formatting is performed in two
+        passes; callers must supply an argument stream valid for both passes.
+
+    SEE ALSO
+        psdSafeRawDoFmtA(), psdFreeVec(), psdCopyStr()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     ULONG len = 0;
@@ -1738,11 +1830,57 @@ struct PsdEndpoint * pAllocEndpoint(struct PsdInterface *pif)
 /* \\\ */
 
 /* /// "psdFindEndpointA()" */
-AROS_LH3(struct PsdEndpoint *, psdFindEndpointA,
+/****** poseidon.library/psdFindEndpointA ************************
+
+    NAME */
+        AROS_LH3(struct PsdEndpoint *, psdFindEndpointA,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdInterface *, pif, A0),
          AROS_LHA(struct PsdEndpoint *, pep, A2),
          AROS_LHA(struct TagItem *, tags, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 67, psd)
+/*  FUNCTION
+        Find an endpoint in the given interface's endpoint list. A previous
+        result may be supplied to continue the search.
+
+    INPUTS
+        pif  - Interface whose endpoint list is searched; must be valid.
+        pep  - Previous endpoint or NULL to start at the first endpoint.
+        tags - Optional endpoint match criteria; see TAGS.
+
+    TAGS
+        EA_IsIn            - Nonzero selects IN, zero selects OUT.
+        EA_EndpointNum     - Endpoint number.
+        EA_TransferType    - Transfer type.
+        EA_MaxPktSize      - Maximum packet size.
+        EA_Interval        - Polling interval.
+        EA_MaxBurst        - Maximum burst value.
+        EA_CompAttributes  - Companion descriptor attributes.
+        EA_BytesPerInterval - Bytes per service interval.
+
+    RESULT
+        Next matching endpoint, or NULL if no match remains. The result
+        is owned by the interface and must not be freed by the caller.
+
+    NOTES
+        All supplied criteria are combined using exact equality, except
+        EA_IsIn, which treats any nonzero value as IN. A NULL pep starts
+        at the list head; otherwise iteration begins at pep's successor.
+
+        No lock is acquired and no ownership check is made for pep. Keep
+        the interface and its endpoint list stable across iteration.
+
+    BUGS
+        Other endpoint tags defined by the public header, including
+        EA_Interface, EA_SyncType, EA_UsageType and EA_MaxStreams, are not
+        interpreted by this search. The function does not check a NULL pif
+        or verify that the continuation endpoint belongs to the list.
+
+    SEE ALSO
+        psdFindInterfaceA(), psdFindDescriptorA()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct TagItem *ti;
@@ -1850,11 +1988,67 @@ struct PsdInterface * pAllocInterface(struct PsdConfig *pc)
 /* \\\ */
 
 /* /// "psdFindInterfaceA()" */
-AROS_LH3(struct PsdInterface *, psdFindInterfaceA,
+/****** poseidon.library/psdFindInterfaceA ************************
+
+    NAME */
+        AROS_LH3(struct PsdInterface *, psdFindInterfaceA,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
          AROS_LHA(struct PsdInterface *, pif, A2),
          AROS_LHA(struct TagItem *, tags, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 66, psd)
+/*  FUNCTION
+        Find an interface in the device's current configuration. Repeated
+        calls can traverse matching interfaces, including alternate settings
+        when alternate-interface searching is enabled.
+
+    INPUTS
+        pd   - Device whose current configuration is searched; must be valid.
+        pif  - Previous interface returned by this search, or NULL to start
+               at the first primary interface of the current configuration.
+        tags - Optional match criteria; see TAGS.
+
+    TAGS
+        IFA_InterfaceNum  - Interface number.
+        IFA_AlternateNum  - Alternate-setting number, or a value above 255 to
+                            enable alternate traversal without filtering by
+                            alternate-setting number.
+        IFA_NumEndpoints  - Number of endpoints.
+        IFA_Class         - Interface class.
+        IFA_SubClass      - Interface subclass.
+        IFA_Protocol      - Interface protocol.
+        IFA_Binding       - Binding pointer.
+        IFA_InterfaceName - Interface name, compared with strcmp().
+        IFA_IDString      - Interface identifier, compared with strcmp().
+
+    RESULT
+        First matching interface after pif, or NULL if no further match
+        exists. The result belongs to the device; it is not a new allocation.
+
+    NOTES
+        A NULL pif starts with the device's current configuration; if there
+        is no current configuration, the function returns NULL. Supplying a
+        previous interface advances past that entry. Alternate interfaces
+        are visited when IFA_AlternateNum is present or when iteration is
+        resumed from an alternate interface.
+
+        The function does not acquire a device lock. A returned pointer and
+        a continuation pointer are valid only while the owning interface
+        lists remain unchanged. String match tags require valid
+        NUL-terminated strings; the implementation does not check for NULL
+        before calling strcmp().
+
+    BUGS
+        The implementation ignores other IFA_* tags declared in the
+        public header, including IFA_Config and IFA_BindingClass. It does
+        not validate that pif belongs to pd or protect traversal against
+        concurrent reconfiguration.
+
+    SEE ALSO
+        psdFindEndpointA(), psdFindDescriptorA()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdConfig *pc;
@@ -2051,11 +2245,59 @@ struct PsdDescriptor * pAllocDescriptor(struct PsdDevice *pd, UBYTE *buf)
 /* \\\ */
 
 /* /// "psdFindDescriptorA()" */
-AROS_LH3(struct PsdDescriptor *, psdFindDescriptorA,
+/****** poseidon.library/psdFindDescriptorA ************************
+
+    NAME */
+        AROS_LH3(struct PsdDescriptor *, psdFindDescriptorA,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
          AROS_LHA(struct PsdDescriptor *, pdd, A2),
          AROS_LHA(struct TagItem *, tags, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 91, psd)
+/*  FUNCTION
+        Search the device's descriptor list in list order, optionally
+        restricting matches by configuration, interface, endpoint and
+        descriptor fields.
+
+    INPUTS
+        pd   - Device whose descriptors are searched; must be valid.
+        pdd  - Previous descriptor, or NULL to start at the list head.
+        tags - Optional descriptor match criteria; see TAGS.
+
+    TAGS
+        DDA_Config           - Exact configuration pointer. If absent,
+                               only the current configuration is searched;
+                               an explicit NULL searches all configurations.
+        DDA_Interface        - Exact interface pointer, including NULL.
+        DDA_Endpoint         - Exact endpoint pointer, including NULL.
+        DDA_DescriptorType   - Descriptor type.
+        DDA_CS_SubType       - Class-specific descriptor subtype.
+        DDA_DescriptorLength - Descriptor length.
+
+    RESULT
+        Next matching descriptor, or NULL when no match remains. The
+        pointer refers to a descriptor owned by the device.
+
+    NOTES
+        A NULL pdd starts at the first descriptor; otherwise iteration
+        starts at the next list node. An absent DDA_Config tag restricts
+        results to the device's current configuration. Supplying the tag
+        with a NULL value disables that default restriction.
+
+        No device lock is acquired. Do not retain or continue iterating
+        through pointers after the descriptor list has been changed.
+
+    BUGS
+        DDA_Device, DDA_Name and DDA_DescriptorData are declared in the
+        public header but are not handled as search criteria here. A NULL
+        pd is dereferenced, and an unrelated continuation pointer is not
+        checked before traversal.
+
+    SEE ALSO
+        psdFindInterfaceA(), psdFindEndpointA()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdConfig *pc = pd->pd_CurrentConfig;
@@ -3699,9 +3941,49 @@ AROS_LH1(struct PsdDevice *, psdGetNextDevice,
 /* \\\ */
 
 /* /// "psdSuspendBindings()" */
-AROS_LH1(BOOL, psdSuspendBindings,
+/****** poseidon.library/psdSuspendBindings ************************
+
+    NAME */
+        AROS_LH1(BOOL, psdSuspendBindings,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 100, psd)
+/*  FUNCTION
+        Prepare a configured USB device for suspension by asking its
+        device and interface class bindings to suspend. Classes that
+        advertise UCCA_SupportsSuspend receive UCM_AttemptSuspendDevice.
+
+    INPUTS
+        pd - Configured Poseidon device with a valid current config.
+             NULL returns FALSE.
+
+    RESULT
+        TRUE if all examined bindings allow suspension, FALSE for NULL
+        or a binding that refuses or blocks suspension. TRUE does not
+        mean the USB device itself has been suspended.
+
+    NOTES
+        Forced suspension is enabled only when pgc_ForceSuspend is set
+        and the current configuration advertises USCAF_REMOTE_WAKEUP.
+        A busy class without suspend support blocks an ordinary suspend;
+        forced suspension requests release of that binding instead.
+        An application device binding also blocks suspension unless
+        forced release is enabled. An idle class without suspend support
+        can remain bound.
+        psdSuspendDevice() takes the device write lock before calling
+        this function. Direct callers must provide suitable synchronization.
+
+    BUGS
+        The implementation dereferences pd->pd_CurrentConfig without
+        validating it. On failure, earlier bindings may already have been
+        suspended or released; no rollback is performed.
+
+    SEE ALSO
+        psdSuspendDevice(), psdResumeBindings(), psdReleaseDevBinding(),
+        psdReleaseIfBinding()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -3803,9 +4085,45 @@ AROS_LH1(BOOL, psdSuspendBindings,
 /* \\\ */
 
 /* /// "psdSuspendDevice()" */
-AROS_LH1(BOOL, psdSuspendDevice,
+/****** poseidon.library/psdSuspendDevice **********************************
+
+    NAME */
+        AROS_LH1(BOOL, psdSuspendDevice,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 98, psd)
+/*  FUNCTION
+        Request suspension of a non-root USB device through its class
+        bindings and parent hub.
+
+    INPUTS
+        pd - Valid Poseidon device. NULL is not safe on the failure path.
+
+    RESULT
+        TRUE if the device is already marked suspended, or the binding
+        suspension and hub suspension requests both succeed; otherwise
+        FALSE.
+
+    NOTES
+        The function first calls psdSuspendBindings() while holding the
+        device write lock. If that succeeds and the parent hub has a class
+        binding, it sends UCM_HubSuspendDevice through that hub's class.
+        An already suspended device returns TRUE without another request.
+
+        Root-hub suspension is explicitly unsupported and returns FALSE.
+        This routine does not itself set the suspended flag; the hub
+        implementation owns the resulting device state.
+
+    BUGS
+        NULL pd reaches the failure message, which dereferences pd while
+        attempting to report the error. Callers must not pass NULL.
+        A failed hub request does not undo successful binding suspension.
+
+    SEE ALSO
+        psdResumeDevice(), psdSuspendBindings(), psdResumeBindings()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -3848,9 +4166,43 @@ AROS_LH1(BOOL, psdSuspendDevice,
 /* \\\ */
 
 /* /// "psdResumeBindings()" */
-AROS_LH1(BOOL, psdResumeBindings,
+/****** poseidon.library/psdResumeBindings ************************
+
+    NAME */
+        AROS_LH1(BOOL, psdResumeBindings,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 101, psd)
+/*  FUNCTION
+        Ask existing class bindings to resume after device suspension.
+        If a class rejects UCM_AttemptResumeDevice, request release of
+        its binding and run psdClassScan() to look for a replacement.
+
+    INPUTS
+        pd - Configured Poseidon device with a valid current config.
+             NULL is accepted and leaves bindings unchanged.
+
+    RESULT
+        TRUE unconditionally. This is not confirmation that bindings
+        resumed successfully or that a replacement binding was found.
+
+    NOTES
+        Application-level device bindings are skipped. The implementation
+        considers the first interface with a binding, then leaves the
+        interface loop without visiting subsequent bound interfaces.
+        psdResumeDevice() invokes this routine after hub resume succeeds.
+        Direct callers must provide suitable synchronization.
+
+    BUGS
+        The first-bound-interface limit can leave other interface
+        bindings unresumed. The return value does not report class resume
+        failures, rebinding results or the NULL-device case.
+
+    SEE ALSO
+        psdResumeDevice(), psdSuspendBindings(), psdClassScan()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -3900,9 +4252,41 @@ AROS_LH1(BOOL, psdResumeBindings,
 /* \\\ */
 
 /* /// "psdResumeDevice()" */
-AROS_LH1(BOOL, psdResumeDevice,
+/****** poseidon.library/psdResumeDevice ***********************************
+
+    NAME */
+        AROS_LH1(BOOL, psdResumeDevice,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 99, psd)
+/*  FUNCTION
+        Request resumption of a suspended non-root USB device through its
+        parent hub, then resume class bindings.
+
+    INPUTS
+        pd - Poseidon device to resume; may be NULL.
+
+    RESULT
+        TRUE if a non-NULL device was not marked suspended, or its parent
+        hub's UCM_HubResumeDevice method returned success. FALSE if pd is
+        NULL, root-hub resume is requested, or the hub request fails or
+        cannot be dispatched.
+
+    NOTES
+        The device write lock protects the hub resume method call.
+        Following a successful hub request, psdResumeBindings() is called
+        to notify or replace class bindings. Its return value is ignored.
+        Root-hub resume is explicitly unsupported by this entry point.
+
+    BUGS
+        The reported success does not confirm that all class bindings
+        resumed. No recovery is performed if the hub method fails.
+
+    SEE ALSO
+        psdSuspendDevice(), psdResumeBindings(), psdSuspendBindings()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -4433,9 +4817,38 @@ AROS_LH2(struct PsdHardware *,psdAddHardware,
 /* \\\ */
 
 /* /// "psdCalculatePower()" */
-AROS_LH1(void, psdCalculatePower,
+/****** poseidon.library/psdCalculatePower *********************************
+
+    NAME */
+        AROS_LH1(void, psdCalculatePower,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdHardware *, phw, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 78, psd)
+/*  FUNCTION
+        Recalculate USB power distribution for every root device attached
+        to the specified controller.
+
+    INPUTS
+        phw - Valid Poseidon hardware controller with an initialized
+              device list.
+
+    NOTES
+        The function takes the Poseidon base read lock. For each root
+        device, it sets the initial power drain to zero and power supply
+        to 500, then invokes the recursive drain and supply calculations
+        for its downstream device tree. Descendant power figures depend on
+        the current device topology and configuration.
+
+    BUGS
+        phw is dereferenced without a NULL check. No result is returned,
+        and the call does not establish that the physical controller can
+        actually deliver the calculated power.
+
+    SEE ALSO
+        psdAddHardware(), psdEnumerateHardware()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdDevice *roothub = NULL;
@@ -4882,9 +5295,37 @@ AROS_LH1(LONG, psdWaitPipe,
 /* \\\ */
 
 /* /// "psdCheckPipe()" */
-AROS_LH1(struct PsdPipe *, psdCheckPipe,
+/****** poseidon.library/psdCheckPipe **************************************
+
+    NAME */
+        AROS_LH1(struct PsdPipe *, psdCheckPipe,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdPipe *, pp, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 71, psd)
+/*  FUNCTION
+        Check whether a pipe's message is still pending, without waiting.
+
+    INPUTS
+        pp - Pipe to inspect; must be valid.
+
+    RESULT
+        NULL while the pipe message has node type NT_MESSAGE. Otherwise
+        returns pp. No new reference or allocation is created.
+
+    NOTES
+        This is a message-state test, not a transfer completion or success
+        check. It does not consume a reply, wait for the hardware task, or
+        examine the transfer's I/O error. Use psdWaitPipe() to collect the
+        result, and psdGetPipeError() to inspect the transfer status.
+
+    BUGS
+        The implementation dereferences pp without checking for NULL.
+
+    SEE ALSO
+        psdSendPipe(), psdWaitPipe(), psdGetPipeError()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     KPRINTF(5, ("psdCheckPipe(%p)\n", pp));
@@ -4923,10 +5364,76 @@ AROS_LH1(LONG, psdGetPipeError,
 /* *** Streams *** */
 
 /* /// "psdOpenStreamA()" */
-AROS_LH2(struct PsdPipeStream *, psdOpenStreamA,
+/****** poseidon.library/psdOpenStreamA ************************************
+
+    NAME */
+        AROS_LH2(struct PsdPipeStream *, psdOpenStreamA,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdEndpoint *, pep, A0),
          AROS_LHA(struct TagItem *, tags, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 72, psd)
+/*  FUNCTION
+        Create a buffered pipe stream for a USB endpoint and configure its
+        underlying pipes using the supplied stream attributes.
+
+    INPUTS
+        pep  - Endpoint to use; must be valid and remain available for the
+               lifetime of the stream.
+        tags - Optional stream configuration tags; see TAGS.
+
+    TAGS
+        PSA_MessagePort      - Reply port; otherwise an internal port is
+                               created. A supplied port remains caller-owned.
+        PSA_NumPipes         - Number of underlying pipes.
+        PSA_BufferSize       - Size of each stream buffer segment.
+        PSA_NakTimeoutTime   - NAK timeout interval.
+        PSA_Error            - Initial stream error value.
+        PSA_TermArray        - Termination-character array.
+        PSA_AbortSigMask     - Signals used to interrupt waiting.
+        PSA_AsyncIO          - Enable asynchronous I/O.
+        PSA_ShortPktTerm     - End reads when a short packet arrives.
+        PSA_ReadAhead        - Enable read-ahead.
+        PSA_BufferedRead     - Enable buffered reads.
+        PSA_BufferedWrite    - Enable buffered writes.
+        PSA_NoZeroPktTerm    - Set the UHFF_NOSHORTPKT pipe flag.
+        PSA_NakTimeout       - Enable NAK timeout handling.
+        PSA_AllowRuntPackets - Permit short packets.
+        PSA_DoNotWait        - Allow reads to return without waiting.
+
+    RESULT
+        New stream pointer, or NULL if pep is NULL, stream allocation
+        fails, or no underlying pipe array is installed. The caller owns
+        the stream and must close it with psdCloseStream().
+
+    NOTES
+        Both directions default to four pipes and a NAK timeout value
+        of 5000. IN endpoints default to read-ahead, buffered reads,
+        and runt-packet acceptance, with 32 maximum packets per buffer
+        segment. OUT endpoints default to no short-packet termination,
+        with four maximum packets per segment.
+
+        PSA_BytesPending and PSA_ActivePipe are query-only attributes,
+        not stream configuration tags.
+
+        psdSetAttrsA(PGA_PIPESTREAM, ...) applies the supplied tags,
+        enforces a minimum of one pipe and one maximum packet per buffer
+        segment, and limits pipe count to available USB3 stream IDs when
+        applicable. The function does not check the attribute setter's
+        return value.
+
+    BUGS
+        A non-NULL result does not establish that every underlying pipe
+        was allocated: the implementation checks the pipe-array pointer,
+        not each entry. On an IN endpoint, failure to allocate the array
+        can also enter cleanup through psdCloseStream(), whose initial
+        flush accesses the missing array.
+
+    SEE ALSO
+        psdCloseStream(), psdSetAttrsA(), psdStreamRead(),
+        psdStreamWrite(), psdStreamFlush()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipeStream *pps;
@@ -4967,9 +5474,46 @@ AROS_LH2(struct PsdPipeStream *, psdOpenStreamA,
 /* \\\ */
 
 /* /// "psdCloseStream()" */
-AROS_LH1(void, psdCloseStream,
+/****** poseidon.library/psdCloseStream ************************************
+
+    NAME */
+        AROS_LH1(void, psdCloseStream,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdPipeStream *, pps, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 73, psd)
+/*  FUNCTION
+        Close a pipe stream, attempting to flush pending stream data,
+        then aborting and waiting for its pipe requests before freeing
+        the pipes, buffers, and stream object.
+
+    INPUTS
+        pps - Stream returned by psdOpenStreamA(), or NULL.
+
+    RESULT
+        None.
+
+    NOTES
+        A NULL pointer is ignored. For an IN stream, the initial flush
+        aborts pending reads and discards buffered replies. For an OUT
+        stream, the flush attempts to submit buffered output when a free
+        pipe is available.
+
+        A reply port created by the stream is deleted. A port supplied
+        by the caller remains caller-owned. The stream pointer is invalid
+        after this call and must not be used again.
+
+    BUGS
+        The result of psdStreamFlush() is discarded, so this function
+        does not report a failed or skipped output flush. Call
+        psdStreamFlush() explicitly before closing when its result
+        matters. Cleanup assumes that each entry in an allocated pipe
+        array is valid; partially initialized streams are unsafe.
+
+    SEE ALSO
+        psdOpenStreamA(), psdStreamFlush(), psdAbortPipe(), psdWaitPipe()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipe *pp;
@@ -5007,11 +5551,63 @@ AROS_LH1(void, psdCloseStream,
 /* \\\ */
 
 /* /// "psdStreamRead()" */
-AROS_LH3(LONG, psdStreamRead,
+/****** poseidon.library/psdStreamRead *************************************
+
+    NAME */
+        AROS_LH3(LONG, psdStreamRead,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdPipeStream *, pps, A1),
          AROS_LHA(UBYTE *, buffer, A0),
          AROS_LHA(LONG, length, D0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 74, psd)
+/*  FUNCTION
+        Read data from a stream connected to an IN endpoint. Depending on
+        stream attributes, receive transfers directly or consume data held
+        in the stream's read buffers.
+
+    INPUTS
+        pps    - Open IN stream returned by psdOpenStreamA().
+        buffer - Destination buffer, large enough for the requested data.
+        length - Maximum bytes to copy; zero is permitted. In buffered
+                 mode, -1 requests all currently buffered bytes instead.
+
+    RESULT
+        Number of bytes copied. Returns -1 for a NULL stream, a stream
+        without pipes, the wrong endpoint direction, or an internal
+        read-queue consistency failure. Zero is possible when no data is
+        available or when no read is performed.
+
+    NOTES
+        Each call with a non-NULL stream clears the recorded stream error
+        before checking direction and performing any I/O. A transfer error
+        can terminate a buffered read after some bytes have been copied;
+        check psdGetStreamError() separately for the I/O status.
+
+        With PSA_BufferedRead enabled, successful replies are queued and
+        consumed in order. PSA_ReadAhead may queue further reads. A
+        termination-character array stops the copy after a matching byte,
+        including that byte in the count. PSA_ShortPktTerm can terminate
+        the read after a short packet. PSA_DoNotWait allows a partial or
+        zero-length return rather than waiting for another reply.
+
+        Without buffered reading, the function issues at most one direct
+        transfer when a free pipe is available. The implementation's
+        asynchronous-I/O branch does not issue a read.
+
+    BUGS
+        The special length value -1 substitutes the number of pending
+        bytes without checking the destination buffer's capacity. It can
+        overwrite an undersized buffer. Outside buffered-read mode, -1
+        is also passed on to a transfer taking an unsigned byte count.
+        Do not use this value. A non-NULL destination pointer is not
+        validated.
+
+    SEE ALSO
+        psdOpenStreamA(), psdStreamWrite(), psdStreamFlush(),
+        psdGetStreamError()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipe *pp;
@@ -5232,11 +5828,55 @@ AROS_LH3(LONG, psdStreamRead,
 /* \\\ */
 
 /* /// "psdStreamWrite()" */
-AROS_LH3(LONG, psdStreamWrite,
+/****** poseidon.library/psdStreamWrite ************************************
+
+    NAME */
+        AROS_LH3(LONG, psdStreamWrite,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdPipeStream *, pps, A1),
          AROS_LHA(UBYTE *, buffer, A0),
          AROS_LHA(LONG, length, D0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 75, psd)
+/*  FUNCTION
+        Write data to an OUT endpoint stream, optionally retaining a
+        trailing partial packet in the stream buffer for a later flush.
+
+    INPUTS
+        pps    - Open OUT stream returned by psdOpenStreamA().
+        buffer - Bytes to write, or a NUL-terminated string when length
+                 is -1; must remain valid during synchronous transfers.
+        length - Number of bytes to accept, or -1 to use strlen(buffer).
+
+    RESULT
+        Number of bytes accepted or transferred, which may be smaller
+        than the requested length. Returns -1 if pps is NULL, the pipe
+        array is absent, or the endpoint direction is not OUT. Zero can
+        mean that no pipe was free or no write was attempted.
+
+    NOTES
+        A non-NULL stream has its recorded error reset at entry. When
+        PSA_BufferedWrite is active, the result may include bytes copied
+        into the stream buffer but not yet sent to the USB device. Call
+        psdStreamFlush() to submit pending output and check its result.
+
+        A configured termination-character array limits the data accepted
+        to the first matching byte, inclusive. With length -1, strlen()
+        determines the original extent and the terminating NUL is not
+        written. On an I/O error, the function records the error and may
+        still return a positive count for bytes processed beforehand.
+
+    BUGS
+        The PSA_AsyncIO branch does not submit output and returns zero.
+        The implementation does not check a non-NULL buffer pointer.
+        Bytes counted as accepted in buffered mode are not a guarantee
+        that the device received them.
+
+    SEE ALSO
+        psdOpenStreamA(), psdStreamRead(), psdStreamFlush(),
+        psdGetStreamError()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipe *pp;
@@ -5467,9 +6107,50 @@ AROS_LH3(LONG, psdStreamWrite,
 /* \\\ */
 
 /* /// "psdStreamFlush()" */
-AROS_LH1(LONG, psdStreamFlush,
+/****** poseidon.library/psdStreamFlush ************************************
+
+    NAME */
+        AROS_LH1(LONG, psdStreamFlush,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdPipeStream *, pps, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 76, psd)
+/*  FUNCTION
+        Discard pending input or attempt to transmit buffered output,
+        according to the stream endpoint's direction.
+
+    INPUTS
+        pps - Open pipe stream returned by psdOpenStreamA().
+
+    RESULT
+        Returns -1 if pps is NULL. For an IN stream, returns nonzero
+        after its pending reads and buffers have been cleared. For an
+        OUT stream, returns nonzero if a free pipe was available and any
+        buffered output was successfully sent; otherwise returns zero.
+
+    NOTES
+        The function clears the recorded stream error at entry. For IN
+        streams, it aborts and waits for each pipe, moves ready replies
+        back to the free list, drains the reply port, and resets buffered
+        byte counters and offsets. The return value does not indicate
+        whether an aborted read had an I/O error.
+
+        For OUT streams, only the first available free pipe is used. If
+        output bytes are pending, psdDoPipe() submits them synchronously.
+        A failed transfer sets the stream error and returns zero. When no
+        free pipe is available, the function returns zero, even if no
+        output bytes are pending.
+
+    BUGS
+        The implementation assumes a fully initialized pipe array; it
+        does not check pps_Pipes or individual pipe pointers before the
+        IN direction's abort-and-wait loop.
+
+    SEE ALSO
+        psdCloseStream(), psdStreamWrite(), psdStreamRead(),
+        psdGetStreamError()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipe *pp;
@@ -5535,9 +6216,39 @@ AROS_LH1(LONG, psdStreamFlush,
 /* \\\ */
 
 /* /// "psdGetStreamError()" */
-AROS_LH1(LONG, psdGetStreamError,
+/****** poseidon.library/psdGetStreamError *********************************
+
+    NAME */
+        AROS_LH1(LONG, psdGetStreamError,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdPipeStream *, pps, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 77, psd)
+/*  FUNCTION
+        Return the error value recorded by a pipe stream.
+
+    INPUTS
+        pps - Pipe stream to inspect, or NULL.
+
+    RESULT
+        Recorded stream error, or -1 if pps is NULL. A value of zero
+        means that the stream currently records no error.
+
+    NOTES
+        The value is read without modifying it. Read, write, and flush
+        operations reset the stored error at entry, so the result should
+        be inspected immediately after the operation of interest. The
+        stored error does not by itself report the number of bytes
+        transferred or prove that buffered output has reached the device.
+
+    BUGS
+        This function does not acquire the stream semaphore. Concurrent
+        activity can change the returned value.
+
+    SEE ALSO
+        psdStreamRead(), psdStreamWrite(), psdStreamFlush()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     KPRINTF(1, ("psdGetStreamError(%p)\n", pps));
@@ -5553,10 +6264,56 @@ AROS_LH1(LONG, psdGetStreamError,
 /* *** Realtime Iso */
 
 /* /// "psdAllocRTIsoHandler()" */
-AROS_LH2(struct PsdRTIsoHandler *, psdAllocRTIsoHandlerA,
+/****** poseidon.library/psdAllocRTIsoHandlerA *****************************
+
+    NAME */
+        AROS_LH2(struct PsdRTIsoHandler *, psdAllocRTIsoHandlerA,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdEndpoint *, pep, A0),
          AROS_LHA(struct TagItem *, tags, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 93, psd)
+/*  FUNCTION
+        Register a real-time isochronous transfer handler for a USB endpoint
+        whose controller supports the real-time isochronous interface.
+
+    INPUTS
+        pep  - Valid isochronous endpoint. Its device and controller must
+               remain available while the handler is registered.
+        tags - Optional handler configuration; see TAGS.
+
+    TAGS
+        RTA_InRequestHook   - Hook used for incoming transfer requests.
+        RTA_OutRequestHook  - Hook used for outgoing transfer requests.
+        RTA_InDoneHook      - Hook for completed incoming transfers.
+        RTA_OutDoneHook     - Hook for completed outgoing transfers.
+        RTA_ReleaseHook     - Hook notified during device teardown.
+        RTA_OutPrefetchSize - Outgoing prefetch size; defaults to 2048.
+
+    RESULT
+        Registered handler, or NULL if the endpoint is invalid, is not
+        isochronous, lacks controller support, or resource allocation or
+        controller registration fails.
+
+    NOTES
+        Registration allocates a handler and a pipe, applies the RTA_* tags,
+        and submits UHCMD_ADDISOHANDLER using DoIO(). On success the handler
+        is linked to the device's real-time isochronous handler list.
+        The returned handler is owned by the caller until released with
+        psdFreeRTIsoHandler(). Registration does not start transfers.
+
+        The device teardown path invokes RTA_ReleaseHook when supplied.
+        That hook does not substitute for managing the handler's lifetime.
+
+    BUGS
+        The implementation does not validate the endpoint's ownership chain
+        before dereferencing it. Controller capability is checked, but no
+        independent runtime check of the driver's quick-I/O behavior is made.
+
+    SEE ALSO
+        psdFreeRTIsoHandler(), psdStartRTIso(), psdStopRTIso()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdRTIsoHandler *prt;
@@ -5605,9 +6362,37 @@ AROS_LH2(struct PsdRTIsoHandler *, psdAllocRTIsoHandlerA,
 /* \\\ */
 
 /* /// "psdFreeRTIsoHandler()" */
-AROS_LH1(void, psdFreeRTIsoHandler,
+/****** poseidon.library/psdFreeRTIsoHandler *******************************
+
+    NAME */
+        AROS_LH1(void, psdFreeRTIsoHandler,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdRTIsoHandler *, prt, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 94, psd)
+/*  FUNCTION
+        Unregister and release a real-time isochronous transfer handler.
+
+    INPUTS
+        prt - Handler returned by psdAllocRTIsoHandlerA(), or NULL.
+
+    NOTES
+        A NULL handler is ignored. Otherwise the function removes the
+        handler from its device list, sends UHCMD_REMISOHANDLER through
+        DoIO(), releases its pipe, and frees the handler allocation.
+        The handler pointer is invalid after this call.
+
+    BUGS
+        The result of the controller removal request is discarded.
+        The implementation does not stop an active handler explicitly
+        or verify that all callback activity has ceased before freeing
+        its memory. Clients must coordinate shutdown with the controller
+        and any callbacks before releasing the handler.
+
+    SEE ALSO
+        psdAllocRTIsoHandlerA(), psdStartRTIso(), psdStopRTIso()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipe *pp;
@@ -5628,9 +6413,39 @@ AROS_LH1(void, psdFreeRTIsoHandler,
 /* \\\ */
 
 /* /// "psdStartRTIso()" */
-AROS_LH1(LONG, psdStartRTIso,
+/****** poseidon.library/psdStartRTIso *************************************
+
+    NAME */
+        AROS_LH1(LONG, psdStartRTIso,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdRTIsoHandler *, prt, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 95, psd)
+/*  FUNCTION
+        Request that the controller start a registered real-time
+        isochronous handler.
+
+    INPUTS
+        prt - Valid registered real-time isochronous handler.
+
+    RESULT
+        UHCMD_STARTRTISO I/O result, or UHIOERR_BADPARAMS for NULL prt.
+        Zero indicates that the controller command completed successfully.
+
+    NOTES
+        If the associated device is suspended, the function first calls
+        psdResumeDevice(). It then issues UHCMD_STARTRTISO through DoIO().
+        On a zero I/O result it increments the device's busy-I/O count.
+
+    BUGS
+        The result of psdResumeDevice() is not checked before the start
+        request. The function does not check for an already active handler;
+        repeated successful starts each increment the busy-I/O count.
+
+    SEE ALSO
+        psdAllocRTIsoHandlerA(), psdStopRTIso(), psdFreeRTIsoHandler()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipe *pp;
@@ -5655,9 +6470,39 @@ AROS_LH1(LONG, psdStartRTIso,
 /* \\\ */
 
 /* /// "psdStopRTIso()" */
-AROS_LH1(LONG, psdStopRTIso,
+/****** poseidon.library/psdStopRTIso **************************************
+
+    NAME */
+        AROS_LH1(LONG, psdStopRTIso,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdRTIsoHandler *, prt, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 96, psd)
+/*  FUNCTION
+        Request that the controller stop a registered real-time
+        isochronous handler.
+
+    INPUTS
+        prt - Valid registered real-time isochronous handler.
+
+    RESULT
+        UHCMD_STOPRTISO I/O result, or UHIOERR_BADPARAMS for NULL prt.
+        Zero indicates that the controller command completed successfully.
+
+    NOTES
+        The function submits UHCMD_STOPRTISO using DoIO() and decrements
+        the associated device's busy-I/O count on a zero I/O result.
+        A failed request leaves that count unchanged.
+
+    BUGS
+        No active-state check precedes the stop request. Repeated successful
+        stops can decrement the busy-I/O count more than once. This entry
+        point does not free the handler or unregister it from the device.
+
+    SEE ALSO
+        psdStartRTIso(), psdFreeRTIsoHandler(), psdAllocRTIsoHandlerA()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdPipe *pp;
@@ -6030,11 +6875,42 @@ AROS_LH0(void, psdClassScan,
 /* \\\ */
 
 /* /// "psdDoHubMethodA()" */
-AROS_LH3(LONG, psdDoHubMethodA,
+/****** poseidon.library/psdDoHubMethodA ***********************************
+
+    NAME */
+        AROS_LH3(LONG, psdDoHubMethodA,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
          AROS_LHA(ULONG, methodid, D0),
          AROS_LHA(APTR, methoddata, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 92, psd)
+/*  FUNCTION
+        Dispatch a USB class method when the device's parent hub has an
+        active class binding.
+
+    INPUTS
+        pd         - Device whose parent hub is inspected; may be NULL.
+        methodid   - USB class method identifier.
+        methoddata - Argument array required by the selected method.
+
+    RESULT
+        Return value from usbDoMethodA() when a parent hub and its class
+        binding are present; otherwise zero. Zero alone does not identify
+        which path was taken or whether a class method ran successfully.
+
+    NOTES
+        The method is sent through usbDoMethodA() without an explicit
+        binding argument. The function only uses the parent hub's binding
+        and owning class to decide whether to dispatch.
+
+        It acquires no device or base lock. Callers must keep the parent
+        hub and its binding stable for the duration of the call.
+
+    SEE ALSO
+        psdHubClassScan(), psdHubClaimAppBindingA()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -6156,9 +7032,37 @@ AROS_LH1(void, psdReleaseAppBinding,
 /* \\\ */
 
 /* /// "psdReleaseDevBinding()" */
-AROS_LH1(void, psdReleaseDevBinding,
+/****** poseidon.library/psdReleaseDevBinding ************************
+
+    NAME */
+        AROS_LH1(void, psdReleaseDevBinding,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 50, psd)
+/*  FUNCTION
+        Request release of an existing whole-device binding. A root-hub
+        binding is released through psdHubReleaseDevBinding(); for a child
+        device the request is forwarded to its parent hub class.
+
+    INPUTS
+        pd - Pointer to a valid Poseidon device. Must not be NULL.
+
+    NOTES
+        The function has no effect when pd->pd_DevBinding is NULL. For
+        child devices it sends UCM_HubReleaseDevBinding only if the parent
+        hub has both a device binding and an associated class.
+        No completion status is returned; the function does not itself
+        clear a child device's binding pointer.
+
+    BUGS
+        A NULL or invalid device pointer is not checked. A missing parent
+        hub binding silently leaves the device binding in place.
+
+    SEE ALSO
+        psdReleaseIfBinding(), psdHubReleaseDevBinding()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -6181,9 +7085,37 @@ AROS_LH1(void, psdReleaseDevBinding,
 /* \\\ */
 
 /* /// "psdReleaseIfBinding()" */
-AROS_LH1(void, psdReleaseIfBinding,
+/****** poseidon.library/psdReleaseIfBinding ************************
+
+    NAME */
+        AROS_LH1(void, psdReleaseIfBinding,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdInterface *, pif, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 51, psd)
+/*  FUNCTION
+        Request release of a USB interface binding through its hub.
+        An interface belonging to a root hub is released directly through
+        psdHubReleaseIfBinding().
+
+    INPUTS
+        pif - Pointer to a valid Poseidon interface. Must not be NULL.
+
+    NOTES
+        The release is requested only if both pif->pif_IfBinding and
+        pif->pif_ClsBinding are set. For a child device the parent hub
+        must have a device binding and an associated class; the request
+        is then sent as UCM_HubReleaseIfBinding. No completion status
+        is returned.
+
+    BUGS
+        A NULL or invalid interface pointer is not checked. An absent
+        class or parent hub binding can leave the interface bound.
+
+    SEE ALSO
+        psdReleaseDevBinding(), psdHubReleaseIfBinding()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -6206,8 +7138,43 @@ AROS_LH1(void, psdReleaseIfBinding,
 /* \\\ */
 
 /* /// "psdUnbindAll()" */
-AROS_LH0(void, psdUnbindAll,
+/****** poseidon.library/psdUnbindAll ************************
+
+    NAME */
+        AROS_LH0(void, psdUnbindAll,
+/*  SYNOPSIS */
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 61, psd)
+/*  FUNCTION
+        Request the release of all device and interface bindings on the
+        registered USB hardware. The function walks each device's bindings
+        and requests their release through the normal Poseidon API.
+
+    INPUTS
+        None.
+
+    NOTES
+        The traversal normally holds the Poseidon base read lock. Before
+        each release request it drops that lock, calls psdReleaseDevBinding()
+        or psdReleaseIfBinding(), reacquires the lock and restarts from the
+        first hardware entry. No status is returned, and the operation is
+        not an atomic snapshot or transaction.
+
+        For a child device, the release functions forward requests to the
+        parent hub. A request does not itself guarantee that the binding
+        has been removed.
+
+    BUGS
+        The loop does not check whether a release request made progress.
+        If a binding remains present, the same request may be repeated
+        indefinitely. Hardware or device removal while the base lock is
+        temporarily dropped is not handled by a stable traversal cursor.
+
+    SEE ALSO
+        psdReleaseDevBinding(), psdReleaseIfBinding(),
+        psdHubReleaseDevBinding(), psdHubReleaseIfBinding()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdHardware *phw;
@@ -6268,9 +7235,49 @@ AROS_LH0(void, psdUnbindAll,
 /* \\\ */
 
 /* /// "psdHubClassScan()" */
-AROS_LH1(void, psdHubClassScan,
+/****** poseidon.library/psdHubClassScan ***********************************
+
+    NAME */
+        AROS_LH1(void, psdHubClassScan,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 82, psd)
+/*  FUNCTION
+        Search registered USB classes for bindings to an enumerated
+        device or its interfaces, including alternate interface settings.
+
+    INPUTS
+        pd - Valid Poseidon device with initialized configuration and
+             interface lists.
+
+    NOTES
+        The function creates a temporary message port, takes the base
+        read lock and the device write lock, then attempts to allocate a
+        control pipe. It does not scan a device that forbids class binding
+        or already has a device-level binding.
+
+        Forced device bindings take priority when no interface is bound.
+        Otherwise the function visits eligible configurations, attempts
+        interface bindings through the registered classes, and may select
+        alternate interface settings. If no interface binding succeeds,
+        it attempts device-level bindings. A successful binding updates
+        ownership, increments the class use count and sends
+        EHMB_ADDBINDING. If a device-class binding exists on exit, the
+        class receives UCM_HubClassScan.
+
+        The control pipe, port and locks are released before returning.
+        Failure to create the message port or pipe prevents scanning.
+
+    BUGS
+        A void return does not distinguish a successful scan, a missing
+        suitable class, an allocation failure or a failed forced binding.
+        The source does not validate pd before accessing its members.
+
+    SEE ALSO
+        psdClassScan(), psdSetForcedBinding(), psdHubClaimAppBindingA()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -6499,9 +7506,52 @@ AROS_LH1(void, psdHubClassScan,
 /* \\\ */
 
 /* /// "psdHubClaimAppBindingA()" */
-AROS_LH1(struct PsdAppBinding *, psdHubClaimAppBindingA,
+/****** poseidon.library/psdHubClaimAppBindingA ****************************
+
+    NAME */
+        AROS_LH1(struct PsdAppBinding *, psdHubClaimAppBindingA,
+/*  SYNOPSIS */
          AROS_LHA(struct TagItem *, tags, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 83, psd)
+/*  FUNCTION
+        Establish a device-level application binding when no device or
+        interface binding is currently installed.
+
+    INPUTS
+        tags - Application binding attributes; see TAGS.
+
+    TAGS
+        ABA_Device      - Device to claim; required.
+        ABA_ReleaseHook - Release callback; required.
+        ABA_UserData    - Value stored with the binding.
+        ABA_Task        - Associated task.
+        ABA_ForceRelease - Binding attribute; this function does not
+                           forcibly release existing bindings.
+
+    RESULT
+        New application-binding handle, or NULL if allocation fails,
+        required attributes are missing, or another binding is present.
+
+    NOTES
+        Attributes are copied into an allocated PsdAppBinding. The
+        function rejects a claim if the device already has a device-level
+        binding or any interface in any configuration is bound. On success
+        it marks the device as application-bound, stores the binding on
+        the device and clears the class-binding pointer.
+
+        The caller owns the binding's lifetime through the corresponding
+        release path. The function takes no device lock while testing or
+        updating binding state.
+
+    BUGS
+        ABA_ForceRelease is not acted upon here. Competing binding changes
+        are not synchronized by this entry point.
+
+    SEE ALSO
+        psdClaimAppBindingA(), psdReleaseAppBinding(), psdHubReleaseDevBinding()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdDevice *pd;
@@ -6548,9 +7598,47 @@ AROS_LH1(struct PsdAppBinding *, psdHubClaimAppBindingA,
 /* \\\ */
 
 /* /// "psdHubReleaseDevBinding()" */
-AROS_LH1(void, psdHubReleaseDevBinding,
+/****** poseidon.library/psdHubReleaseDevBinding ************************
+
+    NAME */
+        AROS_LH1(void, psdHubReleaseDevBinding,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdDevice *, pd, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 84, psd)
+/*  FUNCTION
+        Release a device binding through its local hub-side teardown path.
+        Application bindings receive their release hook; class bindings
+        receive UCM_ReleaseDeviceBinding when an owning class is present.
+
+    INPUTS
+        pd - Poseidon device whose binding is to be released. NULL is
+             accepted and has no effect.
+
+    NOTES
+        The function takes the device write lock and does nothing when
+        pd->pd_DevBinding is NULL.
+
+        An application binding is detached, its release hook is called
+        with the stored user data, the binding is freed, and
+        EHMB_REMBINDING is sent. For a class binding, the device binding
+        pointer is cleared first. If pd->pd_ClsBinding is set, the class
+        pointer is cleared, UCM_ReleaseDeviceBinding is dispatched, the
+        class use count is decremented, and EHMB_REMBINDING is sent.
+
+        The function returns no completion status. A class binding's
+        storage is not freed directly by this entry point.
+
+    BUGS
+        A non-application binding with no associated class is cleared
+        without a class release method or removal event. The release
+        callback's result is not reported to the caller.
+
+    SEE ALSO
+        psdReleaseDevBinding(), psdHubReleaseIfBinding(),
+        psdSendEvent()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -6586,9 +7674,45 @@ AROS_LH1(void, psdHubReleaseDevBinding,
 /* \\\ */
 
 /* /// "psdHubReleaseIfBinding()" */
-AROS_LH1(void, psdHubReleaseIfBinding,
+/****** poseidon.library/psdHubReleaseIfBinding ************************
+
+    NAME */
+        AROS_LH1(void, psdHubReleaseIfBinding,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdInterface *, pif, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 85, psd)
+/*  FUNCTION
+        Release a USB interface binding through its local hub-side
+        teardown path, invoking the owning class's
+        UCM_ReleaseInterfaceBinding method when a class is present.
+
+    INPUTS
+        pif - Valid Poseidon interface. NULL is accepted and has no
+              effect. A non-NULL interface must have a valid configuration
+              and parent device.
+
+    NOTES
+        The parent device is obtained from the interface's configuration.
+        The function takes that device's write lock. If an interface
+        binding exists, its pointer is cleared. When an owning class is
+        present, the class pointer is also cleared, the release method is
+        called and the class use count is decremented.
+
+        EHMB_REMBINDING is sent for any interface binding that was
+        present, including one with no associated class. No event is sent
+        if the binding was already NULL. The function returns no status.
+
+    BUGS
+        A binding without an owning class is cleared without calling a
+        class release method. The class release method's outcome is not
+        reported to the caller.
+
+    SEE ALSO
+        psdReleaseIfBinding(), psdHubReleaseDevBinding(),
+        psdSendEvent()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdUsbClass *puc;
@@ -6619,10 +7743,44 @@ AROS_LH1(void, psdHubReleaseIfBinding,
 /* *** Events *** */
 
 /* /// "psdAddEventHandler()" */
-AROS_LH2(struct PsdEventHook *, psdAddEventHandler,
+/****** poseidon.library/psdAddEventHandler ************************
+
+    NAME */
+        AROS_LH2(struct PsdEventHook *, psdAddEventHandler,
+
+/*  SYNOPSIS */
          AROS_LHA(struct MsgPort *, mp, A1),
          AROS_LHA(ULONG, msgmask, D0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 47, psd)
+/*  FUNCTION
+        Register a message port to receive selected Poseidon events.
+        Each matching event is delivered as a library-allocated message.
+
+    INPUTS
+        mp - Message port to receive the events. Must not be NULL.
+        msgmask - Bitmask of EHMF_* event flags from libraries/poseidon.h.
+
+    RESULT
+        A registration handle, or NULL if mp is NULL or allocation
+        fails. The handle is released by psdRemEventHandler().
+
+    NOTES
+        The caller owns the message port and must keep it valid until
+        psdRemEventHandler() returns. Reply to each delivered message
+        using ReplyMsg(); Poseidon reclaims replied messages later.
+        Event parameters refer to existing objects and are not copied.
+        Their lifetime must not be inferred from the message lifetime.
+
+    BUGS
+        The current removal routine drains and replies to every
+        message still queued on the registered port. Use a dedicated
+        message port to avoid consuming unrelated messages.
+
+    SEE ALSO
+        psdRemEventHandler(), psdSendEvent()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdEventHook *peh = NULL;
@@ -6644,9 +7802,38 @@ AROS_LH2(struct PsdEventHook *, psdAddEventHandler,
 /* \\\ */
 
 /* /// "psdRemEventHandler()" */
-AROS_LH1(void, psdRemEventHandler,
+/****** poseidon.library/psdRemEventHandler ************************
+
+    NAME */
+        AROS_LH1(void, psdRemEventHandler,
+
+/*  SYNOPSIS */
          AROS_LHA(struct PsdEventHook *, peh, A0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 48, psd)
+/*  FUNCTION
+        Unregister an event handler and free its registration handle.
+        A NULL handle has no effect.
+
+    INPUTS
+        peh - Handle returned by psdAddEventHandler(), or NULL.
+
+    NOTES
+        Removes the handler while holding Poseidon's reentrant lock.
+        Replies to all messages currently queued at its message port,
+        then collects replied event messages and frees the handle.
+        The caller retains ownership of the message port.
+        Do not use peh after this call.
+
+    BUGS
+        The current implementation drains the entire supplied port,
+        including unrelated queued messages, not just Poseidon events.
+        Register a dedicated port and avoid other concurrent consumers.
+
+    SEE ALSO
+        psdAddEventHandler(), psdSendEvent()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct Message *msg;
@@ -6668,11 +7855,43 @@ AROS_LH1(void, psdRemEventHandler,
 /* \\\ */
 
 /* /// "psdSendEvent()" */
-AROS_LH3(void, psdSendEvent,
+/****** poseidon.library/psdSendEvent ************************
+
+    NAME */
+        AROS_LH3(void, psdSendEvent,
+
+/*  SYNOPSIS */
          AROS_LHA(ULONG, ehmt, D0),
          AROS_LHA(APTR, param1, A0),
          AROS_LHA(APTR, param2, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 49, psd)
+/*  FUNCTION
+        Send an event to every registered message port whose mask
+        includes the selected event number.
+
+    INPUTS
+        ehmt - EHMB_* event number defined by libraries/poseidon.h.
+        param1 - Event-dependent object pointer; the object is not copied.
+        param2 - Second event-dependent pointer; also not copied.
+
+    NOTES
+        For each matching handler, a separate event message is allocated
+        and queued. The receiver must ReplyMsg() to release the message
+        back to Poseidon for later collection. This call does not wait
+        for receivers to process the message.
+        The event mask is calculated as 1L << ehmt. Pass only defined
+        EHMB_* values, never arbitrary shifts or bit masks.
+
+    BUGS
+        Message allocation failures silently skip the affected handler.
+        No completion or delivery status is returned. Event parameter
+        pointers can become invalid before a receiver processes them.
+
+    SEE ALSO
+        psdAddEventHandler(), psdRemEventHandler()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdEventNote *pen;
@@ -6786,9 +8005,46 @@ AROS_LH2(BOOL, psdReadCfg,
 /* \\\ */
 
 /* /// "psdLoadCfgFromDisk()" */
-AROS_LH1(BOOL, psdLoadCfgFromDisk,
+/****** poseidon.library/psdLoadCfgFromDisk ************************
+
+    NAME */
+        AROS_LH1(BOOL, psdLoadCfgFromDisk,
+/*  SYNOPSIS */
          AROS_LHA(STRPTR, filename, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 79, psd)
+/*  FUNCTION
+        Load a Poseidon preferences FORM from a DOS file and attempt to apply
+        its configuration to the USB stack.
+
+    INPUTS
+        filename - DOS path to the preferences file, or NULL to search the
+                   default paths.
+
+    RESULT
+        TRUE after a recognized FORM header and complete payload read;
+        FALSE if a file cannot be opened or the read cannot be completed.
+        TRUE does not establish that the configuration was accepted.
+
+    NOTES
+        With a NULL filename, ENV:Sys/poseidon.prefs is tried first and
+        ENVARC:Sys/poseidon.prefs is tried only if the first load fails.
+        The file must be a Poseidon IFF PSDCFG FORM. After reading, the
+        implementation calls psdReadCfg() and psdParseCfg(), which may
+        change registered USB classes and hardware. On reported success,
+        the current configuration hash is marked as saved.
+
+    BUGS
+        The return value of psdReadCfg() is ignored. A complete file read
+        can therefore be reported as success even if the FORM is rejected.
+        The FORM length is not checked for a minimum value or a safe upper
+        bound before subtraction and allocation. Malformed length fields
+        can cause unsigned underflow or invalid memory access.
+
+    SEE ALSO
+        psdSaveCfgToDisk(), psdReadCfg(), psdParseCfg()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     ULONG *buf;
@@ -6865,10 +8121,47 @@ AROS_LH1(BOOL, psdLoadCfgFromDisk,
 /* \\\ */
 
 /* /// "psdSaveCfgToDisk()" */
-AROS_LH2(BOOL, psdSaveCfgToDisk,
+/****** poseidon.library/psdSaveCfgToDisk ************************
+
+    NAME */
+        AROS_LH2(BOOL, psdSaveCfgToDisk,
+/*  SYNOPSIS */
          AROS_LHA(STRPTR, filename, A1),
          AROS_LHA(BOOL, executable, D0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 80, psd)
+/*  FUNCTION
+        Serialize the current Poseidon configuration and write it to a
+        DOS file.
+
+    INPUTS
+        filename   - Destination DOS path, or NULL for both default
+                     preferences paths.
+        executable - Unused by the current implementation.
+
+    RESULT
+        TRUE when serialization returns a buffer and the destination
+        file is opened, or when both default-path calls report TRUE.
+        FALSE otherwise. A TRUE result does not confirm a complete write.
+
+    NOTES
+        With a NULL filename, ENVARC:Sys/poseidon.prefs is written first,
+        followed by ENV:Sys/poseidon.prefs; both calls are made and both
+        must report success. A named destination is opened with
+        MODE_NEWFILE, replacing its previous contents. The serialized
+        buffer is released internally. After reported success, the current
+        configuration hash is marked as saved. The executable argument
+        does not affect file creation or permissions.
+
+    BUGS
+        The return value of Write() is ignored. Short or failed writes
+        may be reported as successful, including when a destination has
+        been truncated. No temporary file or atomic replacement is used.
+
+    SEE ALSO
+        psdLoadCfgFromDisk(), psdWriteCfg(), psdParseCfg()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     ULONG *buf;
@@ -7004,9 +8297,37 @@ AROS_LH1(struct PsdIFFContext *, psdNextCfgForm,
 /* \\\ */
 
 /* /// "psdAllocCfgForm()" */
-AROS_LH1(struct PsdIFFContext *, psdAllocCfgForm,
+/****** poseidon.library/psdAllocCfgForm ************************
+
+    NAME */
+        AROS_LH1(struct PsdIFFContext *, psdAllocCfgForm,
+/*  SYNOPSIS */
          AROS_LHA(ULONG, formid, D0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 86, psd)
+/*  FUNCTION
+        Allocate an empty Poseidon IFF FORM context with the specified form
+        identifier. The new context is registered in the library's separate
+        configuration-form list, not inserted into the active config tree.
+
+    INPUTS
+        formid - IFF FORM type identifier stored in the new context.
+
+    RESULT
+        A new FORM context, or NULL if allocation fails.
+
+    NOTES
+        The context initially contains no chunks or child FORMs. Its FORM
+        payload length is four bytes for the type identifier. Release the
+        context with psdRemCfgForm() when it is no longer needed; do not
+        free the returned pointer directly. No active configuration change
+        or notification is performed by this function.
+
+    SEE ALSO
+        psdRemCfgForm(), psdReadCfg(), psdWriteCfg(),
+        psdAddStringChunk()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdIFFContext *pic;
@@ -7155,8 +8476,44 @@ AROS_LH2(APTR, psdGetCfgChunk,
 /* \\\ */
 
 /* /// "psdParseCfg()" */
-AROS_LH0(void, psdParseCfg,
+/****** poseidon.library/psdParseCfg ***************************************
+
+    NAME */
+        AROS_LH0(void, psdParseCfg,
+/*  SYNOPSIS */
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 60, psd)
+/*  FUNCTION
+        Apply the stored Poseidon stack configuration to installed USB
+        controller hardware and USB class libraries.
+
+    NOTES
+        If the global stack configuration form is absent, the function
+        returns without changing the installed hardware or classes. If the
+        form contains no hardware entries, existing hardware is retained.
+        Classes marked resident are retained while still in use.
+
+        The function reconciles configured class names and enabled hardware
+        units with the live lists, removes obsolete entries, loads missing
+        classes, and enumerates newly added controllers. It then marks the
+        configuration as read, updates the saved hash and starts a class
+        scan. During early task-based startup, a configured boot delay can
+        be applied when mass-storage bindings are active.
+
+        Configuration locks are released before removals, then reacquired
+        while adding classes and hardware. This routine may allocate,
+        open libraries, enumerate devices and delay its caller.
+
+    BUGS
+        The class-addition path holds the configuration lock while opening
+        libraries; the implementation explicitly notes a possible deadlock
+        when library initialization accesses configuration in another task.
+        No completion or partial-failure status is returned.
+
+    SEE ALSO
+        psdReadCfg(), psdClassScan(), psdAddClass(), psdAddHardware()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdIFFContext *pic;
@@ -7631,11 +8988,57 @@ AROS_LH3(struct PsdIFFContext *, psdGetUsbDevCfg,
 /* \\\ */
 
 /* /// "psdSetForcedBinding()" */
-AROS_LH3(BOOL, psdSetForcedBinding,
+/****** poseidon.library/psdSetForcedBinding ************************
+
+    NAME */
+        AROS_LH3(BOOL, psdSetForcedBinding,
+/*  SYNOPSIS */
          AROS_LHA(STRPTR, owner, A2),
          AROS_LHA(STRPTR, devid, A0),
          AROS_LHA(STRPTR, ifid, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 69, psd)
+/*  FUNCTION
+        Store or remove a forced USB class binding in Poseidon's device
+        configuration. A binding may apply to a whole device or to one
+        interface, depending on whether an interface identifier is given.
+
+    INPUTS
+        owner - Class owner name to store. NULL or an empty string removes
+                the forced-binding chunk instead.
+        devid - NUL-terminated device identifier to look up; must be valid.
+        ifid  - NUL-terminated interface identifier for an interface-level
+                setting, or NULL for a device-level setting.
+
+    RESULT
+        TRUE if the requested configuration operation is reported as
+        successful; FALSE if a required form or chunk could not be added.
+        Removing a binding can return TRUE even when no matching record
+        or forced-binding chunk existed.
+
+    NOTES
+        The configuration is accessed under the exclusive ConfigLock.
+        Existing matching records are updated. For a nonempty owner,
+        missing device or interface forms may be created. The class name
+        is copied into a configuration chunk. The configuration-change
+        check runs after releasing ConfigLock.
+
+        This function changes stored configuration. It does not release
+        existing USB bindings, claim devices, or guarantee that the named
+        class will be selected immediately.
+
+    BUGS
+        Removal reports TRUE without checking whether a chunk was found
+        or deleted. Adding a form or a sequence of string chunks has no
+        rollback: allocation failure can leave incomplete configuration
+        records even when FALSE is returned. Duplicate matching interface
+        forms may all be updated. No validation of a NULL device identifier
+        is performed before string comparison.
+
+    SEE ALSO
+        psdGetForcedBinding(), psdParseCfg(), psdAddStringChunk()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdIFFContext *pic;
@@ -7740,10 +9143,52 @@ AROS_LH3(BOOL, psdSetForcedBinding,
 /* \\\ */
 
 /* /// "psdGetForcedBinding()" */
-AROS_LH2(STRPTR, psdGetForcedBinding,
+/****** poseidon.library/psdGetForcedBinding ************************
+
+    NAME */
+        AROS_LH2(STRPTR, psdGetForcedBinding,
+/*  SYNOPSIS */
          AROS_LHA(STRPTR, devid, A0),
          AROS_LHA(STRPTR, ifid, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 70, psd)
+/*  FUNCTION
+        Look up the configured forced class binding for a device or one
+        of its interfaces.
+
+    INPUTS
+        devid - NUL-terminated device identifier to look up; must be valid.
+        ifid  - NUL-terminated interface identifier, or NULL to query the
+                device-level forced binding.
+
+    RESULT
+        Pointer to the class owner name stored in the matching
+        configuration chunk, or NULL if no matching forced binding is
+        found. The pointer is borrowed; it must not be freed by the caller.
+
+    NOTES
+        The lookup holds ConfigLock in shared mode but releases it before
+        returning. The result points directly into Poseidon's internal
+        configuration storage, not to an allocated copy. A later update,
+        deletion or relocation of the chunk buffer may invalidate it.
+        External synchronization is required when a stable reference is
+        needed; the function provides no protected copy operation.
+
+        A non-NULL interface identifier selects interface-level lookup.
+        If no interface binding is found, the function does not fall back
+        to a device-level setting. NULL also represents missing device
+        or interface records.
+
+    BUGS
+        The returned pointer is not protected against concurrent
+        configuration changes after the shared lock is released.
+        No validation of a NULL device identifier is performed before
+        string comparison.
+
+    SEE ALSO
+        psdSetForcedBinding(), psdGetStringChunk(), psdParseCfg()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     struct PsdIFFContext *pic;
@@ -7792,11 +9237,46 @@ AROS_LH2(STRPTR, psdGetForcedBinding,
 /* \\\ */
 
 /* /// "psdAddStringChunk()" */
-AROS_LH3(BOOL, psdAddStringChunk,
+/****** poseidon.library/psdAddStringChunk ************************
+
+    NAME */
+        AROS_LH3(BOOL, psdAddStringChunk,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdIFFContext *, pic, A0),
          AROS_LHA(ULONG, chunkid, D0),
          AROS_LHA(CONST_STRPTR, str, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 87, psd)
+/*  FUNCTION
+        Store a string in a configuration FORM as an IFF chunk. An
+        existing chunk with the same identifier is replaced.
+
+    INPUTS
+        pic     - Valid Poseidon FORM context. Must not be NULL.
+        chunkid - Identifier of the chunk to create or replace.
+        str     - NUL-terminated input string. Must not be NULL.
+
+    RESULT
+        TRUE when the chunk was stored; FALSE if allocation or insertion
+        fails.
+
+    NOTES
+        The string is copied, including its terminating NUL, into a
+        length-prefixed IFF chunk. The temporary chunk buffer is released
+        before this function returns. The config write lock covers the
+        operation. This entry point does not set ps_CheckConfigReq or
+        dispatch a configuration-change notification.
+
+    BUGS
+        Replacing a chunk is not atomic. The existing chunk is removed
+        before the replacement's storage is grown. If that allocation
+        fails, the original value has already been lost.
+
+    SEE ALSO
+        psdMatchStringChunk(), psdGetStringChunk(),
+        psdRemCfgChunk(), psdAddCfgEntry()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     BOOL res;
@@ -7810,11 +9290,40 @@ AROS_LH3(BOOL, psdAddStringChunk,
 /* \\\ */
 
 /* /// "psdMatchStringChunk()" */
-AROS_LH3(BOOL, psdMatchStringChunk,
+/****** poseidon.library/psdMatchStringChunk ************************
+
+    NAME */
+        AROS_LH3(BOOL, psdMatchStringChunk,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdIFFContext *, pic, A0),
          AROS_LHA(ULONG, chunkid, D0),
          AROS_LHA(CONST_STRPTR, str, A1),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 88, psd)
+/*  FUNCTION
+        Compare a supplied string with the contents of a string chunk
+        in a configuration FORM.
+
+    INPUTS
+        pic     - Valid Poseidon FORM context. Must not be NULL.
+        chunkid - Identifier of the chunk to inspect.
+        str     - NUL-terminated string to compare. Must not be NULL.
+
+    RESULT
+        TRUE if a matching chunk was found; FALSE if no matching chunk
+        exists or the comparison fails.
+
+    NOTES
+        Comparison is case-sensitive. The config read lock covers the
+        lookup and comparison. The stored length limits the comparison;
+        this routine does not validate the chunk as a complete, properly
+        NUL-terminated string. Malformed chunk data may therefore produce
+        misleading matches.
+
+    SEE ALSO
+        psdAddStringChunk(), psdGetStringChunk(), psdGetCfgChunk()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     BOOL res;
@@ -7828,10 +9337,45 @@ AROS_LH3(BOOL, psdMatchStringChunk,
 /* \\\ */
 
 /* /// "psdGetStringChunk()" */
-AROS_LH2(STRPTR, psdGetStringChunk,
+/****** poseidon.library/psdGetStringChunk ************************
+
+    NAME */
+        AROS_LH2(STRPTR, psdGetStringChunk,
+/*  SYNOPSIS */
          AROS_LHA(struct PsdIFFContext *, pic, A0),
          AROS_LHA(ULONG, chunkid, D0),
+/*  LOCATION */
          LIBBASETYPEPTR, ps, 89, psd)
+/*  FUNCTION
+        Return an allocated copy of the contents of a string chunk in
+        a configuration FORM.
+
+    INPUTS
+        pic     - Valid Poseidon FORM context. Must not be NULL.
+        chunkid - Identifier of the chunk to copy.
+
+    RESULT
+        Allocated copy of the chunk data, or NULL if the chunk is absent
+        or memory allocation fails.
+
+    NOTES
+        The config read lock covers the lookup and copy. The function
+        allocates the stored chunk length plus one byte, copies exactly
+        the stored length and returns the allocation to the caller.
+        Release it with psdFreeVec(). Unlike a borrowed config pointer,
+        this allocation remains owned by the caller after the read lock
+        is released.
+
+    BUGS
+        The function does not explicitly write a trailing NUL. Treat
+        the result as a C string only when the stored chunk contains a
+        terminator; arbitrary or malformed chunk data is not validated.
+
+    SEE ALSO
+        psdAddStringChunk(), psdMatchStringChunk(), psdFreeVec(),
+        psdGetCfgChunk()
+
+******************************************************************************/
 {
     AROS_LIBFUNC_INIT
     STRPTR str;
