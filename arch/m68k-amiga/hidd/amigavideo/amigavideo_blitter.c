@@ -76,11 +76,12 @@ static const UWORD rightmask[] = {
     0xfff8, 0xfffc, 0xfffe, 0xffff
 };
 
-static const UBYTE copy_minterm[] = { 0xff, 0x00, 0x00, 0xca, 0x00, 0x00, 0x00, 0xea, 0x00, 0x00, 0xff, 0x00, 0x3a, 0x00, 0x00, 0xff };
+static const UBYTE copy_minterm[] = { 0xff, 0x8a, 0x00, 0xca, 0x00, 0x00, 0x00, 0xea, 0x00, 0x00, 0xff, 0x00, 0x3a, 0x00, 0x00, 0xff };
 /* Every entry carries /AC (NABC | NANBC = 0x0a), which is what leaves the
  * destination alone where the A channel's edge mask is zero. Without it a blit
  * clears the pixels its first and last word mask out.
  *
+ * [1] = And (D = src AND dst): ABC is 0x80, so the entry is 0x8a.
  * [7] = Or (D = src OR dst): A(B + C) is 0xe0, so the entry is 0xea.
  * [12] = CopyInverted (D = NOT src): copy minterm 0xca with the B (source)
  * channel inverted -> 0x3a. Used by DrawImageState for an icon's selected
@@ -166,36 +167,24 @@ BOOL blit_copybox(struct amigavideo_staticdata *data, struct BitMap *srcbm, stru
     dstx2 &= 15;
     srcx2 &= 15;
 
+    shiftb = shift << 12;
+    if (dstwidth >= srcwidth) {
+        width = dstwidth;
+        shifta = 0;
+    } else {
+        width = srcwidth;
+        shifta = shiftb;
+        dstx = srcx;
+        dstx2 = srcx2;
+    }
+    afwm = leftmask[dstx];
+    alwm = rightmask[dstx2];
     if (reverse) {
-        if (dstwidth >= srcwidth) {
-            width = dstwidth;
-            shifta = 0;
-            shiftb = shift << 12;
-            alwm = leftmask[dstx];
-            afwm = rightmask[dstx2];
-        } else {
-           width = srcwidth;
-           shifta = shift << 12;
-           shiftb = shift << 12;
-           alwm = leftmask[srcx];
-           afwm = rightmask[srcx2];
-        }
+        UWORD tmp = afwm;
+        afwm = alwm;
+        alwm = tmp;
         srcoffset += srcbm->BytesPerRow * (h - 1) + (width - 1) * 2;
         dstoffset += dstbm->BytesPerRow * (h - 1) + (width - 1) * 2;
-    } else {
-        if (dstwidth >= srcwidth) {
-            width = dstwidth;
-            shifta = 0;
-            shiftb = shift << 12;
-            afwm = leftmask[dstx];
-            alwm = rightmask[dstx2];
-        } else {
-           width = srcwidth;
-           shifta = shift << 12;
-           shiftb = shift << 12;
-           afwm = leftmask[srcx];
-           alwm = rightmask[srcx2];
-        }
     }
 
     D(bug("[AmigaVideo:Blitter] %s: shift=%d rev=%d sw=%d dw=%d %04x %04x\n", __func__, shift, reverse, srcwidth, dstwidth, afwm, alwm));
@@ -208,12 +197,12 @@ BOOL blit_copybox(struct amigavideo_staticdata *data, struct BitMap *srcbm, stru
     custom->bltbmod = srcbm->BytesPerRow - width * 2;
     custom->bltcmod = dstbm->BytesPerRow - width * 2;
     custom->bltdmod = dstbm->BytesPerRow - width * 2;
-    custom->bltcon1 = (reverse ? 0x0002 : 0x0000) | shiftb;
     bltcon0 = USEB | USEC | USED | copy_minterm[mode] | shifta;
     custom->bltadat = 0xffff;
     
     for (i = 0; i < dstbm->Depth; i++) {
         UWORD bltcon0b = bltcon0;
+        PLANEPTR source = i < srcbm->Depth ? srcbm->Planes[i] : NULL;
         /* The write mask protects the planes it clears. It is a UBYTE, so it
            says nothing about a ninth plane and beyond: leave those writable. */
         if (i < 8 && !(mask & (1 << i)))
@@ -221,15 +210,17 @@ BOOL blit_copybox(struct amigavideo_staticdata *data, struct BitMap *srcbm, stru
         if (dstbm->Planes[i] == (UBYTE*)0x00000000 || dstbm->Planes[i] == (UBYTE*)0xffffffff)
             continue;
         WaitBlit();
-        if (i >= srcbm->Depth || srcbm->Planes[i] == (UBYTE*)0x00000000) {
+        if (!source || source == (PLANEPTR)-1) {
             bltcon0b &= ~USEB;
-            custom->bltbdat = 0x0000;
-        } else if (srcbm->Planes[i] == (UBYTE*)0xffffffff) {
-            bltcon0b &= ~USEB;
-            custom->bltbdat = 0xffff;
+            custom->bltcon1 = reverse ? 0x0002 : 0x0000;
+            custom->bltbdat = source ? 0xffff : 0x0000;
         } else {
-            custom->bltbpt = (APTR)(srcbm->Planes[i] + srcoffset);
+            custom->bltcon1 = (reverse ? 0x0002 : 0x0000) | shiftb;
+            custom->bltbpt = (APTR)(source + srcoffset);
         }
+        /* A disabled B channel uses BLTBDAT repeatedly. Shifting that
+           constant would drop bits at each word boundary instead of
+           carrying them from the preceding DMA word. */
         custom->bltcon0 = bltcon0b;
         custom->bltcpt = (APTR)(dstbm->Planes[i] + dstoffset);
         custom->bltdpt = (APTR)(dstbm->Planes[i] + dstoffset);
@@ -394,23 +385,26 @@ BOOL blit_copybox_mask(struct amigavideo_staticdata *data, struct BitMap *srcbm,
     custom->bltbmod = srcbm->BytesPerRow - width * 2;
     custom->bltcmod = dstbm->BytesPerRow - width * 2;
     custom->bltdmod = dstbm->BytesPerRow - width * 2;
-    custom->bltcon1 = (reverse ? 0x0002 : 0x0000) | bltshift;
+    /* CopyBoxMasked's Or mode represents BltMaskBitMapRastPort's 0xe0:
+       replacement through the mask, rather than OR with old destination bits.
+       Both supported API modes therefore use the hardware cookie cut. */
     bltcon0 = USEA | USEB | USEC | USED | 0xca | bltshift;
     
     for (i = 0; i < dstbm->Depth; i++) {
         UWORD bltcon0b = bltcon0;
+        PLANEPTR source = i < srcbm->Depth ? srcbm->Planes[i] : NULL;
         if (dstbm->Planes[i] == (UBYTE*)0x00000000 || dstbm->Planes[i] == (UBYTE*)0xffffffff)
             continue;
         WaitBlit();
-        if (i >= srcbm->Depth || srcbm->Planes[i] == (UBYTE*)0x00000000) {
+        if (!source || source == (PLANEPTR)-1) {
             bltcon0b &= ~USEB;
-            custom->bltbdat = 0x0000;
-        } else if (srcbm->Planes[i] == (UBYTE*)0xffffffff) {
-            bltcon0b &= ~USEB;
-            custom->bltbdat = 0xffff;
+            custom->bltcon1 = reverse ? 0x0002 : 0x0000;
+            custom->bltbdat = source ? 0xffff : 0x0000;
         } else {
-            custom->bltbpt = (APTR)(srcbm->Planes[i] + srcoffset);
+            custom->bltcon1 = (reverse ? 0x0002 : 0x0000) | bltshift;
+            custom->bltbpt = (APTR)(source + srcoffset);
         }
+        /* Keep the mask's A shift, but do not shift a constant B plane. */
         custom->bltcon0 = bltcon0b;
         custom->bltapt = (APTR)maskplane;
         custom->bltcpt = (APTR)(dstbm->Planes[i] + dstoffset);

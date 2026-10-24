@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 1995-2019, The AROS Development Team. All rights reserved.
+    Copyright (C) 1995-2026, The AROS Development Team. All rights reserved.
     Copyright (C) 2001-2003, The MorphOS Development Team. All Rights Reserved.
 */
 
@@ -34,6 +34,7 @@
 
 #include "intuition_intern.h"
 #include "gadgets.h"
+#include "decorsupport.h"
 
 /**************************************************************************************************/
 
@@ -60,129 +61,6 @@
 #define DRI(dri) ((struct DrawInfo *)(dri))
 
 /**************************************************************************************************/
-
-static inline VOID getintframesizes(struct IntuitionBase *IntuitionBase, WORD *xsize, WORD *ysize)
-{
-    switch (FRAME_SIZE(IntuitionBase))
-    {
-        case FRAMESIZE_THICK:
-            *xsize = 2;
-            *ysize = 2;
-            break;
-        case FRAMESIZE_MEDRES:
-            *xsize = 2;
-            *ysize = 1;
-            break;
-        default:    /* FRAMESIZE_THIN */
-            *xsize = 1;
-            *ysize = 1;
-            break;
-    }
-}
-
-static void renderimageframe(struct RastPort *rp, ULONG which, ULONG state, UWORD *pens,
-                             WORD left, WORD top, WORD width, WORD height,
-                             struct IntuitionBase *IntuitionBase)
-{
-    struct GfxBase *GfxBase = GetPrivIBase(IntuitionBase)->GfxBase;
-    WORD right = left + width - 1;
-    WORD bottom = top + height - 1;
-    BOOL leftedgegodown = FALSE;
-    BOOL topedgegoright = FALSE;
-    UWORD frameh;
-    UWORD framev;
-
-    getintframesizes(IntuitionBase, &frameh, &framev);
-
-    switch(which)
-    {
-#if 0
-    case CLOSEIMAGE:
-            /* draw separator line at the right side */
-            SetAPen(rp, pens[SHINEPEN]);
-            RectFill(rp, right, top, right, bottom - 1);
-            SetAPen(rp, pens[SHADOWPEN]);
-            WritePixel(rp, right, bottom);
-
-            right--;
-            break;
-
-    case ZOOMIMAGE:
-    case DEPTHIMAGE:
-    case SDEPTHIMAGE:
-            /* draw separator line at the left side */
-            SetAPen(rp, pens[SHINEPEN]);
-            WritePixel(rp, left, top);
-            SetAPen(rp, pens[SHADOWPEN]);
-            RectFill(rp, left, top + 1, left, bottom);
-
-            left++;
-            break;
-#endif
-
-    case UPIMAGE:
-    case DOWNIMAGE:
-            leftedgegodown = TRUE;
-            break;
-
-    case LEFTIMAGE:
-    case RIGHTIMAGE:
-            topedgegoright = TRUE;
-            break;
-    }
-
-    if (left == 0) leftedgegodown = TRUE;
-    if (top == 0) topedgegoright = TRUE;
-
-    SetAPen(rp, pens[((state == IDS_SELECTED) || (state == IDS_INACTIVESELECTED)) ? SHADOWPEN : SHINEPEN]);
-
-    /* left edge */
-    RectFill(rp, left,
-             top,
-             left + (frameh - 1),
-             bottom - (leftedgegodown ? 0 : framev));
-
-    /* top edge */
-    RectFill(rp, left + 1,
-             top,
-             right - (topedgegoright ? 0 : frameh),
-             top + (framev - 1));
-
-    SetAPen(rp, pens[((state == IDS_SELECTED) || (state == IDS_INACTIVESELECTED)) ? SHINEPEN : SHADOWPEN]);
-
-    /* right edge */
-    RectFill(rp, right - (frameh - 1),
-             top + (topedgegoright ? frameh : 0),
-             right,
-             bottom);
-
-    /* bottom edge */
-    RectFill(rp, left + (leftedgegodown ? framev : 0),
-             bottom - (framev - 1),
-             right - 1,
-             bottom);
-}
-
-/**************************************************************************************************/
-
-static UWORD getbgpen(ULONG state, UWORD *pens)
-{
-    UWORD bg;
-    switch (state)
-    {
-    case IDS_NORMAL:
-    case IDS_SELECTED:
-            bg = pens[FILLPEN];
-            break;
-
-    default:
-            bg = pens[BACKGROUNDPEN];
-            break;
-    }
-
-    return bg;
-}
-
 
 /**************************************************************************************************/
 

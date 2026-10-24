@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 2002-2019, The AROS Development Team. All rights reserved.
+    Copyright (C) 2002-2026, The AROS Development Team. All rights reserved.
     Copyright (C) 2001-2003, The MorphOS Development Team. All Rights Reserved.
 */
 
@@ -92,12 +92,34 @@ void ActivateMonitor(Object *newmonitor, WORD x, WORD y, struct IntuitionBase *I
         /* A crude copy from inputhandler.c. We should really handle this in monitorclass */
         if (scr)
         {
-            DWidth = (scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MaxX -
-                      scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MinX + 1) *
-                     int_MouseScaleX(scr) - 1;
-            DHeight = (scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MaxY -
-                       scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MinY + 1) *
-                      int_MouseScaleY(scr) - 1;
+            UWORD cw = scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MaxX -
+                       scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MinX + 1;
+            UWORD ch = scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MaxY -
+                       scr->ViewPort.ColorMap->cm_vpe->DisplayClip.MinY + 1;
+
+            /* The clip is in the screen's pixels, the pointer in the
+             * display's, which a scaled screen does not share. */
+            if (GetPrivScreen(scr)->SpecialFlags & SF_ScaledCoords)
+            {
+                struct msScreenToDisplayCoords coordmsg =
+                {
+                    .MethodID   = MM_ScreenToDisplayCoords,
+                    .Screen     = scr,
+                    .ScrX       = cw,
+                    .ScrY       = ch,
+                    .DispX      = &DWidth,
+                    .DispY      = &DHeight
+                };
+
+                DoMethodA(newmonitor, (Msg)&coordmsg);
+                DWidth--;
+                DHeight--;
+            }
+            else
+            {
+                DWidth = cw * int_MouseScaleX(scr) - 1;
+                DHeight = ch * int_MouseScaleY(scr) - 1;
+            }
         }
         else
         {
@@ -407,3 +429,25 @@ void ReleaseSharedPointer(struct SharedPointer *pointer,
     }
     UnlockIBase(lock);
 }
+
+// TODO: Move to arch specific files.
+#ifdef __mc68000__
+/* See intuition_intern.h */
+UWORD int_MouseScaleX(const struct Screen *screen)
+{
+    if (screen && screen->RastPort.BitMap &&
+        !IS_HIDD_BM(screen->RastPort.BitMap) &&
+        !(screen->ViewPort.Modes & (HIRES | SUPERHIRES)))
+        return 2;
+    return 1;
+}
+
+UWORD int_MouseScaleY(const struct Screen *screen)
+{
+    if (screen && screen->RastPort.BitMap &&
+        !IS_HIDD_BM(screen->RastPort.BitMap) &&
+        !(screen->ViewPort.Modes & LACE))
+        return 2;
+    return 1;
+}
+#endif

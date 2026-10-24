@@ -44,6 +44,51 @@
 
 static const double huge = 0x1p1023;
 
+/****************************************************************************
+    NAME
+        double complex csinh(
+
+    SYNOPSIS
+        double complex z)
+
+    FUNCTION
+        Return the complex hyperbolic sine of z.
+
+    INPUTS
+        z - Double complex value x + i*y, with y in radians.
+
+    RESULT
+        An approximation to sinh(x) * cos(y) + i*cosh(x) * sin(y)
+        in double complex.
+
+        For signed-zero y, returns sinh(x) with that same
+        imaginary zero; infinite or NaN x is retained in the
+        real component. For zero x and infinite or NaN y,
+        returns x + i*NaN.
+
+        For finite nonzero x and infinite or NaN y, both
+        components are NaN. For infinite x and finite nonzero y,
+        evaluates x*cos(y) + i*infinity*sin(y). For infinite x
+        and infinite or NaN y, returns x + i*NaN. For NaN x and
+        nonzero y, both components are NaN.
+
+    NOTES
+        Include <complex.h>. Each component can overflow or
+        underflow independently. Use round-to-nearest mode for
+        trigonometric argument reduction. Floating-point
+        exceptions can occur; enabled traps may prevent return.
+
+        Do not use errno alone to detect component overflow.
+
+    BUGS
+        Large finite real parts can reach undefined signed-shift
+        arithmetic in exp(). Results on those paths are not
+        portable.
+
+    SEE ALSO
+        ccosh(), ctanh(), csin()
+
+*****************************************************************************/
 double complex
 csinh(double complex z)
 {

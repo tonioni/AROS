@@ -246,7 +246,7 @@ LONG checkLine(ShellState *ss, Buffer *in, Buffer *out, BOOL echo)
                 tmpchr = out->buf[out->len - 1];
                 out->buf[out->len - 1] = 0;
             }
-            bug("[Shell] %s %s\n", ss->command + 2, out->buf);
+            D(bug("[Shell] %s %s\n", ss->command + 2, out->buf));
             if (out->len > 0)
                 out->buf[out->len - 1] = tmpchr;
         }
@@ -331,7 +331,17 @@ static void unloadCommand(ShellState *ss, BPTR commandSeg,
         Permit();
     }
     else
-        UnLoadSeg(commandSeg);
+    {
+        /*
+         * Unload what cli_Module holds now, as the Kickstart CLI does, not the
+         * segment we loaded. Self-decrunching executables (PowerPacker,
+         * Imploder and similar stubs, common on old disks) unpack into new
+         * memory, free their own packed hunks and put the new SegList into
+         * cli_Module for the CLI to unload. Unloading the original segment
+         * again freed it twice and leaked the unpacked one.
+         */
+        UnLoadSeg(cli->cli_Module);
+    }
 
     cli->cli_Module = BNULL;
 }

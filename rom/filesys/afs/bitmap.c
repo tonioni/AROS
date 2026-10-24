@@ -281,16 +281,30 @@ ULONG *data;
 ULONG *extcopy;
 struct bmWindow win = {0, 0, NULL, 0};
 
+        blocks=volume->countblocks-volume->bootblocks; /* blocks to count */
+        maxinbitmap = (volume->SizeBlock-1)*32;        /* max blocks marked in a bitmapblock */
+
         win.bufblocks = BM_COUNTBATCHBYTES / BLOCK_SIZE(volume);
+        /*
+         * Never read ahead more blocks than the volume's bitmap has. The window
+         * pays off on hard disks with many bitmap blocks; on a floppy the bitmap
+         * is a single block, and a 64 KB read from there costs several extra
+         * cylinders (seconds) on every mount.
+         */
+        {
+                ULONG bmblocks = (blocks + maxinbitmap - 1) / maxinbitmap;
+
+                if (bmblocks > 25)
+                        bmblocks += (bmblocks - 25 + volume->SizeBlock - 2) / (volume->SizeBlock - 1);
+                if (win.bufblocks > bmblocks)
+                        win.bufblocks = bmblocks;
+        }
         if (win.bufblocks > 1)
                 win.buf = AllocVec((win.bufblocks + 1) * BLOCK_SIZE(volume), MEMF_PUBLIC);
         if (win.buf == NULL)
                 return countUsedBlocksSingle(afsbase, volume);
         /* extension block content must survive window refills */
         extcopy = (ULONG *)(win.buf + win.bufblocks * BLOCK_SIZE(volume));
-
-        blocks=volume->countblocks-volume->bootblocks; /* blocks to count */
-        maxinbitmap = (volume->SizeBlock-1)*32;        /* max blocks marked in a bitmapblock */
         /* check bitmap blocks stored in rootblock */
         for (i=0;i<=24;i++)
         {
@@ -463,7 +477,7 @@ LONG invalidBitmap(struct AFSBase *afsbase, struct Volume *volume) {
                 return DOSFALSE;
         volume->lastextensionblock = 0;
         volume->lastposition = 0;
-        volume->bstartblock = volume->bootblocks;       /* reserved */
+        volume->bstartblock = 0;        /* relative, see volumes.h */
         volume->bitmapblock = getBlock(afsbase, volume, volume->bitmapblockpointers[volume->lastposition]);
         if (volume->bitmapblock != NULL)
         {

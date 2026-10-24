@@ -46,8 +46,8 @@
 #endif
 #ifdef __mc68000__
 #   include <graphics/view.h>
-#   include <hidd/gfx.h>
 #endif
+#include <hidd/gfx.h>
 #ifndef GRAPHICS_REGIONS_H
 #   include <graphics/regions.h>
 #endif
@@ -732,7 +732,7 @@ struct IntScreen
     UWORD                    Pens[NUMDRIPENS];
     struct PubScreenNode    *pubScrNode;
     Object                  *depthgadget;
-    UWORD                    SpecialFlags;
+    ULONG                    SpecialFlags;   /* SF_*: the mode's COMPF_* flags live in bits 8 and up */
     struct Layer            *rootLayer;
     struct Hook              *preAlphaCompHook;
 #if !USE_NEWDISPLAYBEEP
@@ -791,10 +791,12 @@ void UpdateScreenBitMap(struct Screen *s, struct IntuitionBase *IntuitionBase);
 #define SF_InvisibleBar     (0x0004)
 #define SF_AppearingBar     (0x0008)
 #define SF_Draggable	    (0x0020) /* Screen can be dragged		     */
-#define SF_ComposeAbove	    (0x0100) /* Composition capabilities	     */
-#define SF_ComposeBelow	    (0x0200)
-#define SF_ComposeLeft	    (0x0400)
-#define SF_ComposeRight	    (0x0800)
+/* The mode's COMPF_* composition flags, shifted up by eight (openscreen.c) */
+#define SF_ComposeAbove	    (COMPF_ABOVE << 8) /* Composition capabilities */
+#define SF_ComposeBelow	    (COMPF_BELOW << 8)
+#define SF_ComposeLeft	    (COMPF_LEFT << 8)
+#define SF_ComposeRight	    (COMPF_RIGHT << 8)
+#define SF_ScaledCoords	    (COMPF_SCALE << 8) /* own pixels via the driver */
 
 #define SF_VertCompose (SF_ComposeAbove|SF_ComposeBelow)
 #define SF_HorCompose  (SF_ComposeLeft |SF_ComposeRight)
@@ -1517,26 +1519,21 @@ struct menudecor_data
 /* Classic Intuition tracks the pointer in high-resolution, interlaced
  * display coordinates. Native planar screens convert those to screen pixels;
  * HIDD bitmaps already use the display driver's coordinate conversion. */
+#ifdef __mc68000__
+/* Out of line on m68k (misc.c): their bodies are too large to repeat at
+ * every call site in the ROM. Elsewhere the scale is always 1. */
+UWORD int_MouseScaleX(const struct Screen *screen);
+UWORD int_MouseScaleY(const struct Screen *screen);
+#else
 static inline UWORD int_MouseScaleX(const struct Screen *screen)
 {
-#ifdef __mc68000__
-    if (screen && screen->RastPort.BitMap &&
-        !IS_HIDD_BM(screen->RastPort.BitMap) &&
-        !(screen->ViewPort.Modes & (HIRES | SUPERHIRES)))
-        return 2;
-#endif
     return 1;
 }
 
 static inline UWORD int_MouseScaleY(const struct Screen *screen)
 {
-#ifdef __mc68000__
-    if (screen && screen->RastPort.BitMap &&
-        !IS_HIDD_BM(screen->RastPort.BitMap) &&
-        !(screen->ViewPort.Modes & LACE))
-        return 2;
-#endif
     return 1;
 }
+#endif
 
 #endif /* INTUITION_INTERN_H */

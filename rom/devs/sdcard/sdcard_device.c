@@ -361,19 +361,14 @@ static void cmd_ChangeState(struct IORequest *io, LIBBASETYPEPTR LIBBASE)
 
 static void cmd_ProtStatus(struct IORequest *io, LIBBASETYPEPTR LIBBASE)
 {
-    D(bug("[SDCard%02ld] %s()\n", ((struct sdcard_Unit *)io->io_Unit)->sdcu_UnitNum, __PRETTY_FUNCTION__));
+    struct sdcard_Unit *unit = (struct sdcard_Unit *)io->io_Unit;
 
-    /* Write unsupported yet, return write protect state *always* */
-    IOStdReq(io)->io_Actual = -1;
-
-    #if 0
+    D(bug("[SDCard%02ld] %s()\n", unit->sdcu_UnitNum, __PRETTY_FUNCTION__));
 
     if ((unit->sdcu_Flags & (AF_Card_WriteProtect|AF_Card_Locked)) != 0)
         IOStdReq(io)->io_Actual = -1;
     else
         IOStdReq(io)->io_Actual = 0;
-
-    #endif
 }
 
 static void cmd_GetNumTracks(struct IORequest *io, LIBBASETYPEPTR LIBBASE)
@@ -703,6 +698,31 @@ AROS_LH1(LONG, AbortIO,
     AROS_LIBFUNC_EXIT
 }
 
+/*****************************************************************************
+    NAME
+        ULONG GetRdskLba(
+
+    SYNOPSIS
+        struct IORequest *io)
+
+    FUNCTION
+        Return the fixed value zero. This entrypoint does not search
+        for or read a rigid disk block.
+
+    INPUTS
+        io - Request for a successfully opened sdcard.device unit.
+             Both io and io_Unit must be valid. Keep the unit open
+             throughout the call.
+
+    RESULT
+        Always zero. The value does not establish that a rigid disk
+        block exists at logical block zero.
+
+    NOTES
+        No device I/O is issued. The request and its error field are
+        left unchanged. This entrypoint provides no discovery status.
+
+*****************************************************************************/
 AROS_LH1(ULONG, GetRdskLba,
     AROS_LHA(struct IORequest *, io, A1),
     LIBBASETYPEPTR, LIBBASE, 7, sdcard)
@@ -716,6 +736,36 @@ AROS_LH1(ULONG, GetRdskLba,
     AROS_LIBFUNC_EXIT
 }
 
+/*****************************************************************************
+    NAME
+        ULONG GetBlkSize(
+
+    SYNOPSIS
+        struct IORequest *io)
+
+    FUNCTION
+        Return the sector-size exponent stored for the opened unit's
+        bus.
+
+    INPUTS
+        io - Request for a successfully opened sdcard.device unit.
+             Both io and io_Unit must be valid. Keep the unit open
+             throughout the call.
+
+    RESULT
+        The stored base-two exponent of the sector size in bytes,
+        returned as ULONG. For example, 9 denotes 512-byte sectors.
+        This is not a byte count.
+
+    NOTES
+        The call reads the cached bus value without issuing device
+        I/O or checking media presence. It leaves the request and its
+        error field unchanged.
+
+        No error result is provided for an unopened, closed or invalid
+        request. The pointers are not validated.
+
+*****************************************************************************/
 AROS_LH1(ULONG, GetBlkSize,
     AROS_LHA(struct IORequest *, io, A1),
     LIBBASETYPEPTR, LIBBASE, 8, sdcard)

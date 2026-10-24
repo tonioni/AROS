@@ -91,6 +91,15 @@
           * io_Error contains possaible error code or 0 if command was
             successfull
 
+    NI_REMOVE - remove an entry
+        Inputs:
+          * io_Data contains a database entry structure whose name member
+            (pw_name, gr_name) names the entry to remove
+        Results:
+          * io_Error contains NIERR_NOTFOUND if there is no such entry, or
+            0 if command was successfull. The change is written to the
+            file with CMD_UPDATE, as for CMD_WRITE.
+
     NI_MEMBERS - find out memberships
         This command is implemented only for group unit.  It collects
         the IDs of groups which have a given user as member.
@@ -133,6 +142,8 @@ static int NetInfo__DevInit(LIBBASETYPEPTR LIBBASE)
     D(bug("[NetInfo] %s()\n", __func__));
 
     LIBBASE->nid_Task = NULL;
+    LIBBASE->nid_WorkerID = 0;
+    LIBBASE->nid_OpenWaiters = 0;
     InitSemaphore(LIBBASE->nid_Lock);
     return TRUE;
 }
@@ -152,6 +163,19 @@ static int NetInfo__DevOpen(LIBBASETYPEPTR LIBBASE,
     if (unit >= NETINFO_UNITS)
         goto zap;
 
+    /* Expunge may already have asked this worker to exit. Do not attach
+     * a unit to maps it is about to free. Drop the lock while waiting,
+     * since the worker needs it to finish its cleanup. */
+    while (LIBBASE->nid_Task != NULL && LIBBASE->nid_Death != NULL &&
+           LIBBASE->nid_Death->mn_Node.ln_Type != NT_MESSAGE) {
+        /* The generated open count is not incremented until we return. */
+        LIBBASE->nid_OpenWaiters++;
+        ReleaseSemaphore(LIBBASE->nid_Lock);
+        Delay(1);
+        ObtainSemaphore(LIBBASE->nid_Lock);
+        LIBBASE->nid_OpenWaiters--;
+    }
+
     /*
      * Create device task if necessary
      */
@@ -163,6 +187,12 @@ static int NetInfo__DevOpen(LIBBASETYPEPTR LIBBASE,
         LIBBASE->nid_DOSBase = OpenLibrary("dos.library",37L);
         if (LIBBASE->nid_DOSBase == NULL)
             break;
+
+        /* A previous worker may still be leaving: expunge tracks one. */
+        while (LIBBASE->nid_WorkerID != 0 &&
+               FindTaskByPID(LIBBASE->nid_WorkerID) != NULL)
+            Delay(1);
+        LIBBASE->nid_WorkerID = 0;
 
         mp = CreateMsgPort();
         if (mp == NULL)
@@ -234,16 +264,27 @@ static int NetInfo__DevClose(LIBBASETYPEPTR LIBBASE,
  */
 static int NetInfo__DevExpunge(LIBBASETYPEPTR LIBBASE)
 {
+    int ready = FALSE;
+
     D(bug("[NetInfo] %s()\n", __func__));
 
     if (AttemptSemaphore(LIBBASE->nid_Lock)) {
         if (LIBBASE->nid_Task) {
             if (LIBBASE->nid_Death && LIBBASE->nid_Death->mn_Node.ln_Type == NT_MESSAGE)
                 ReplyMsg(LIBBASE->nid_Death);
+        } else if (LIBBASE->nid_OpenWaiters == 0 &&
+                   (LIBBASE->nid_WorkerID == 0 ||
+                    FindTaskByPID(LIBBASE->nid_WorkerID) == NULL)) {
+            /* Exec removes the worker only after it has left this module
+             * for DOS's exit code. Forbid() alone would not stop it on
+             * another CPU. */
+            LIBBASE->nid_WorkerID = 0;
+            ready = TRUE;
         }
         ReleaseSemaphore(LIBBASE->nid_Lock);
     }
-    return TRUE;
+    /* The worker still needs this module and its auto-opened libraries. */
+    return ready;
 }
 
 ADD2OPENDEV(NetInfo__DevOpen, 0)

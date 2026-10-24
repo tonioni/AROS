@@ -107,6 +107,8 @@ struct DriverData{
 	BOOL isInOpen;		// Driver is opened if at least one of these two ones is TRUE
 	BOOL isOutOpen;
 
+	BOOL isAttached;		// innode and outnode are in their clusters
+
 	ULONG *buffer;				// Sendbuffer start
 	ULONG *buffercurrsend;	// Sendbuffer write
 	ULONG *buffercurr;		// Sendbuffer read
@@ -202,6 +204,8 @@ struct MyMidiNode{
 	UBYTE *sysex_read;
 	UBYTE *sysex_laststart;
 	BOOL sysex_nextis0;
+	BOOL sysex_started_empty;
+	BOOL sysex_discarding;
 	UBYTE lastreadstatus;
 };
 
@@ -222,6 +226,14 @@ struct CamdBase_intern{
        obtained exclusive before adding/deleting to/from various lists. */
 
     struct SignalSemaphore *CLSemaphore;
+
+    /* Serialize DEVS:Midi scans without holding CLSemaphore over LoadSeg. */
+    struct SignalSemaphore DriverScanSemaphore;
+
+    /* Protects clusnotifynodes. Obtained after CLSemaphore, never before, so
+       that StartClusterNotify() and EndClusterNotify() work while the caller
+       holds LockCAMD(). */
+    struct SignalSemaphore NotifySemaphore;
 
 };
 
@@ -333,6 +345,7 @@ void Receiver_SysExSuperTreat(
 	UBYTE data
 );
 int GetSysXLen(UBYTE *buffer);
+void SetMidiError(struct MyMidiNode *mymidinode,ULONG errorcode);
 BOOL PutSysEx2Link(struct MidiLink *midilink,UBYTE data);
 void Receiver_SetError(
 	struct DriverData *driverdata,
@@ -373,6 +386,20 @@ void CloseDriver(struct DriverData *driverdata,struct CamdBase *CamdBase);
 void FreeDriverData(struct Drivers *driver,
 	struct CamdBase *CamdBase
 );
+BOOL AttachDriverData(struct Drivers *driver,
+	struct CamdBase *CamdBase
+);
+void DetachDriverData(struct Drivers *driver,
+	struct CamdBase *CamdBase
+);
+void SignalClusterNotify(struct CamdBase *CamdBase);
+LONG ScanDrivers(struct CamdBase *CamdBase);
+#ifndef __amigaos4__
+void InitDriverWatch(struct CamdBase *CamdBase);
+void DriversChanged(void);
+void StopDriverWatch(void);
+#endif
+void ClusterParticipantsChanged(struct MidiCluster *cluster,struct MidiNode *changer,struct CamdBase *CamdBase);
 void LoadDriver(char *name,
 	struct CamdBase *CamdBase
 );

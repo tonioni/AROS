@@ -1111,7 +1111,7 @@ static const char THIS_FILE[] = __FILE__;
        )
     {
         success = TRUE;
-#ifdef __AROS__ /* AROS: Get HIDD composition flags */
+#ifdef __AROS__ /* AROS: Get HIDD composition flags, as SF_Compose* and SF_ScaledCoords */
         screen->SpecialFlags = ((compflags & (dimensions.reserved[0] >> 16)) | (dimensions.reserved[0] & 0xFFFF)) << 8;
         screen->preAlphaCompHook = compalphahook;
 
@@ -1606,7 +1606,20 @@ static const char THIS_FILE[] = __FILE__;
 
             if (VideoControl(screen->Screen.ViewPort.ColorMap, tags) == 0)
             {
+                /*
+                 * The screen's composition parameters travel with its ViewPort:
+                 * the display's compositor reads them from the chain it is
+                 * given, instead of asking Intuition.
+                 */
+                struct TagItem comptags[] =
+                {
+                    { VTAG_COMPOSITING_SET, screen->SpecialFlags >> 8 },
+                    { VTAG_ALPHAHOOK_SET  , (IPTR)compalphahook       },
+                    { VTAG_END_CM         , 0                         }
+                };
+
                 DEBUG_OPENSCREEN(dprintf("OpenScreen: VideoControl ok\n"));
+                VideoControl(screen->Screen.ViewPort.ColorMap, comptags);
                 ok = TRUE;
             }
             else

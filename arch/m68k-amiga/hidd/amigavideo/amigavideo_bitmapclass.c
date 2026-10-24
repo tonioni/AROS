@@ -73,7 +73,7 @@ OOP_Object *AmigaVideoBM__Root__New(OOP_Class *cl, OOP_Object *o, struct pRoot_N
         modeid = modeidtag->ti_Data;
         if (modeid & HAM_KEY)
         {
-            bug("[AmigaVideo:Bitmap] %s: HAM mode requested\n", __func__);
+            D(bug("[AmigaVideo:Bitmap] %s: HAM mode requested\n", __func__));
             hamFlag = TRUE;
         }
     }
@@ -267,7 +267,7 @@ VOID AmigaVideoBM__Root__Set(OOP_Class *cl, OOP_Object *o, struct pRoot_Set *msg
 
     if ((newxoffset != data->leftedge) || (newyoffset != data->topedge))
     {
-        struct pHidd_Compositor_BitMapPositionChanged bpcmsg =
+        struct pHidd_AmigaVideoCompositor_BitMapPositionChanged bpcmsg =
         {
             mID : CSD(cl)->mid_BitMapPositionChanged,
             bm : o

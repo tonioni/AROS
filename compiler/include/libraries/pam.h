@@ -119,10 +119,14 @@ struct PamHandle;
 #define PAM_PROMPT_ECHO_ON          2   /* ask, echo (a user name)             */
 #define PAM_ERROR_MSG               3   /* show an error                       */
 #define PAM_TEXT_INFO               4   /* show a message                      */
+#define PAM_AROS_STATUS             5   /* progress while a hardware token is waited for:
+                                         * msg is what to show (NULL: done); sent again and
+                                         * again while waiting, so it must return at once,
+                                         * with no answer; PAM_CONV_ERR gives up           */
 
 struct pam_message
 {
-    LONG                msg_style;      /* PAM_PROMPT_#?, PAM_ERROR_MSG, PAM_TEXT_INFO */
+    LONG                msg_style;      /* PAM_PROMPT_#?, PAM_ERROR_MSG, PAM_TEXT_INFO, PAM_AROS_STATUS */
     CONST_STRPTR        msg;
 };
 
@@ -142,9 +146,11 @@ struct pam_response
  * Without a hook the library uses one of its own:
  *   - PAMT_Interactive TRUE: the console (PAM_AROS_INPUT/OUTPUT, default
  *     the process's Input()/Output()), passwords unechoed;
- *   - otherwise the "preset" conversation, which answers prompts only from
- *     PAM_USER / PAM_AUTHTOK and fails any other question, so that a server
- *     can never block waiting for a person.
+ *   - otherwise the "preset" conversation: the items the application set
+ *     (PAM_USER, PAM_AUTHTOK, PAM_OLDAUTHTOK) reach the modules directly,
+ *     and any question is answered with PAM_CONV_ERR, so that a server
+ *     can never block waiting for a person and no answer meant for one
+ *     question is given to another.
  */
 struct PamConvMsg
 {
@@ -188,5 +194,11 @@ typedef void (*PamDataCleanup)(struct PamHandle *handle, APTR data, LONG status)
 #define PAM_MODULE_SUFFIX           ".pam"
 #define PAM_CONFIG_DIR              "SYS:Security/PAM"
 #define PAM_DEFAULT_SERVICE         "other"
+
+/* Module data under which the built-in "security" module keeps the login
+ * ticket it obtained (struct secLoginTicket *, <libraries/security.h>).
+ * security.library's own login redeems it; PamEnd() gives back one that
+ * was not used. */
+#define PAM_SECURITY_TICKET_DATA    "security.ticket"
 
 #endif /* LIBRARIES_PAM_H */

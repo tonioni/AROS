@@ -15,6 +15,7 @@
 #include "security_intern.h"
 #include "security_task.h"
 #include "security_server.h"
+#include "security_keys.h"
 #include "security_groupinfo.h"
 #include "security_userinfo.h"
 #include "security_monitor.h"
@@ -106,6 +107,7 @@ static void FillUserInfo(struct secUserDef *def, struct secPrivUserInfo *info)
     strncpy(info->Pub.Shell, def->Shell, secSHELLSIZE - 1);
     info->Pub.Shell[secSHELLSIZE - 1] = '\0';
     info->Password = (def->Password[0] != '\0');
+    info->Locked = (def->Password[0] == '!');
 }
 
 /*
@@ -122,6 +124,43 @@ static void FillGroupInfo(struct secGroupDef *def, struct secPrivGroupInfo *info
 }
 
 /*
+ * Lock or unlock an account (root only)
+ */
+static BOOL LockUser(struct SecurityBase *secBase, struct Task *client, STRPTR userid, BOOL lock)
+{
+    struct secUserDef *def;
+    BOOL res = FALSE;
+
+    if (!client || (GetTaskOwner(secBase, client) >> 16) != secROOT_UID || !userid)
+        return FALSE;
+    for (def = GetUserDefs(secBase); def; def = def->Next)
+    {
+        if (!strcmp(userid, def->UserID))
+        {
+            ULONG len = strlen(def->Password);
+
+            if (lock == (def->Password[0] == '!'))
+                return TRUE;
+            /* ParseUserLine() leaves a byte for the '!' */
+            if (lock)
+            {
+                memmove(def->Password + 1, def->Password, len + 1);
+                def->Password[0] = '!';
+            }
+            else
+                memmove(def->Password, def->Password + 1, len);
+            res = UpdateUserDefs(secBase);
+            {
+                SIPTR args[2] = { (SIPTR)userid, (SIPTR)(lock ? "locked" : "unlocked") };
+                VLogF(secBase, LOGF_Flag_Type_Information, SECLOG_SUB_SERVER, "account '%s' %s", args);
+            }
+            break;
+        }
+    }
+    return res;
+}
+
+/*
  * Check if a user is authorised to login. Returns a private user info
  * (allocated with secAllocUserInfo(), to be freed by the caller) or NULL.
  */
@@ -135,6 +174,13 @@ static struct secPrivUserInfo *CheckUser(struct SecurityBase *secBase, ULONG use
     {
         if (!strcmp(userid, def->UserID))
         {
+            /* a security key can only be checked by Security.auth */
+            if (!nopasswd && (secBase->Config.Flags & secCFGF_KeyLogin) && UserHasKeys(secBase, def->UserID))
+            {
+                SIPTR args[1] = { (SIPTR)userid };
+                VLogF(secBase, LOGF_Flag_Type_Warn, SECLOG_SUB_SERVER, "'%s' has hardware tokens, which cannot be checked without the authentication process", args);
+                break;
+            }
             if (nopasswd || verifypass(secBase, def->UserID, def->Password, pwd ? pwd : (STRPTR)""))
             {
                 if ((info = (struct secPrivUserInfo *)secAllocUserInfo()))
@@ -155,7 +201,7 @@ static struct secPrivUserInfo *CheckUser(struct SecurityBase *secBase, ULONG use
         SIPTR args[2];
         args[0] = uid;
         args[1] = (SIPTR)userid;
-        VLogF(secBase, GetLogStr(secBase, info ? MSG_LOG_LOGIN : MSG_LOG_LOGINFAIL), args);
+        VLogF(secBase, info ? LOGF_Flag_Type_Information : LOGF_Flag_Type_Warn, SECLOG_SUB_SERVER, GetLogStr(secBase, info ? MSG_LOG_LOGIN : MSG_LOG_LOGINFAIL), args);
     }
 
     return info;
@@ -186,7 +232,7 @@ static BOOL CheckPasswd(struct SecurityBase *secBase, ULONG user, STRPTR pwd)
     {
         SIPTR args[1];
         args[0] = uid;
-        VLogF(secBase, GetLogStr(secBase, valid ? MSG_LOG_CHECKPASSWD : MSG_LOG_CHECKPASSWDFAIL), args);
+        VLogF(secBase, valid ? LOGF_Flag_Type_Verbose : LOGF_Flag_Type_Warn, SECLOG_SUB_SERVER, GetLogStr(secBase, valid ? MSG_LOG_CHECKPASSWD : MSG_LOG_CHECKPASSWDFAIL), args);
     }
 
     return valid;
@@ -223,7 +269,7 @@ static BOOL Passwd(struct SecurityBase *secBase, ULONG user, STRPTR oldpwd, STRP
     {
         SIPTR args[1];
         args[0] = uid;
-        VLogF(secBase, GetLogStr(secBase, changed ? MSG_LOG_PASSWD : MSG_LOG_PASSWDFAIL), args);
+        VLogF(secBase, changed ? LOGF_Flag_Type_Information : LOGF_Flag_Type_Warn, SECLOG_SUB_SERVER, GetLogStr(secBase, changed ? MSG_LOG_PASSWD : MSG_LOG_PASSWDFAIL), args);
     }
 
     return changed;
@@ -609,8 +655,45 @@ static void ServerProcess(void)
 
                 case secSAction_Log:
                     /* Arg1: fmt, Arg2: SIPTR *args */
-                    VLogF(secBase, (CONST_STRPTR)pkt->Arg1, (SIPTR *)pkt->Arg2);
+                    VLogF(secBase, LOGF_Flag_Type_Information, SECLOG_SUB_SERVER, (CONST_STRPTR)pkt->Arg1, (SIPTR *)pkt->Arg2);
                     pkt->Res1 = TRUE;
+                    break;
+
+                case secSAction_LockUser:
+                    /* Arg1: STRPTR userid, Arg2: BOOL lock. Res1: BOOL. Locked = the
+                     * stored hash prefixed with '!', which no password matches */
+                    pkt->Res1 = LockUser(secBase, client, (STRPTR)pkt->Arg1, (BOOL)pkt->Arg2);
+                    break;
+
+                case secSAction_UserAdmin:
+                    pkt->Res1 = UserAdmin(secBase, client, (struct secUARequest *)pkt->Arg1);
+                    break;
+
+                case secSAction_KeyAdmin:
+                    pkt->Res1 = KeyAdmin(secBase, client, (struct secKARequest *)pkt->Arg1);
+                    break;
+
+                case secSAction_GetUserKeys:
+                    /* Security.auth only. Arg1: STRPTR userid, Arg2: struct secKeyRec ** (the
+                     * list, to free with FreeKeys()). Res1: BOOL any */
+                    pkt->Res1 = FALSE;
+                    if (client && client == (struct Task *)secBase->Auth && pkt->Arg2)
+                    {
+                        *(struct secKeyRec **)pkt->Arg2 = LoadKeys(secBase, (STRPTR)pkt->Arg1);
+                        pkt->Res1 = (*(struct secKeyRec **)pkt->Arg2 != NULL);
+                    }
+                    break;
+
+                case secSAction_KeyCounter:
+                    /* Security.auth only. Arg1: userid, Arg2: public id, Arg3: counter. Res1: BOOL */
+                    pkt->Res1 = FALSE;
+                    if (client && client == (struct Task *)secBase->Auth)
+                        pkt->Res1 = UpdateKeyCounter(secBase, (STRPTR)pkt->Arg1, (STRPTR)pkt->Arg2, (ULONG)pkt->Arg3);
+                    break;
+
+                case secSAction_UserHasKeys:
+                    /* Arg1: STRPTR userid. Res1: BOOL */
+                    pkt->Res1 = UserHasKeys(secBase, (STRPTR)pkt->Arg1);
                     break;
 
                 case secSAction_GetUserHash:
